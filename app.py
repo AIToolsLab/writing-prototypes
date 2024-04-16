@@ -1,9 +1,4 @@
 import streamlit as st
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForCausalLM
 import pandas as pd
 import html
 
@@ -20,10 +15,12 @@ if model_name == 'other':
 
 @st.cache_resource
 def get_tokenizer(model_name):
+    from transformers import AutoTokenizer
     return AutoTokenizer.from_pretrained(model_name).from_pretrained(model_name)
 
 @st.cache_resource
 def get_model(model_name):
+    from transformers import AutoModelForCausalLM
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto', torch_dtype=torch.bfloat16)
     print(f"Loaded model, {model.num_parameters():,d} parameters.")
     return model
@@ -33,6 +30,8 @@ doc = st.text_area("Document", "This is a document that I would like to have rew
 
 
 def get_spans_local(prompt, doc):
+    import torch
+    
     tokenizer = get_tokenizer(model_name)
     model = get_model(model_name)
 
