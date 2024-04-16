@@ -91,8 +91,8 @@ for span in spans:
 
 html_out = ''
 for span in spans:
-    b = int(256 * span["token_loss"] / highest_loss)
-    html_out += f'<span style="color: rgba(128, 128, {b:d})" title="{html.escape(span["most_likely_token"])}">{html.escape(span["token"])}</span>'
+    is_different = span['token'] != span['most_likely_token']
+    html_out += f'<span style="color: {'red' if is_different else 'black'}" title="{html.escape(span["most_likely_token"])}">{html.escape(span["token"])}</span>'
 html_out = f"<p style=\"background: white;\">{html_out}</p>"
 
 st.subheader("Rewritten document")
