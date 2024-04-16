@@ -7,6 +7,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 import pandas as pd
 
 model_options = [
+    'API',
     'google/gemma-1.1-2b-it',
     'google/gemma-1.1-7b-it'
 ]
@@ -26,46 +27,62 @@ def get_model(model_name):
     print(f"Loaded model, {model.num_parameters():,d} parameters.")
     return model
 
-tokenizer = get_tokenizer(model_name)
-model = get_model(model_name)
-
 prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.")
 doc = st.text_area("Document", "This is a document that I would like to have rewritten to be more concise.")
 
 
-messages = [
-    {
-        "role": "user",
-        "content": f"{prompt}\n\n{doc}",
-    },
-]
-tokenized_chat = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt")[0]
-assert len(tokenized_chat.shape) == 1
+def get_spans_local(prompt, doc):
+    tokenizer = get_tokenizer(model_name)
+    model = get_model(model_name)
 
-doc_ids = tokenizer(doc, return_tensors='pt')['input_ids'][0]
-joined_ids = torch.cat([tokenized_chat, doc_ids[1:]])
 
-# Call the model
-with torch.no_grad():
-    logits = model(joined_ids[None].to(model.device)).logits[0].cpu()
+    messages = [
+        {
+            "role": "user",
+            "content": f"{prompt}\n\n{doc}",
+        },
+    ]
+    tokenized_chat = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt")[0]
+    assert len(tokenized_chat.shape) == 1
 
-spans = []
-length_so_far = 0
-for idx in range(len(tokenized_chat), len(joined_ids)):
-    probs = logits[idx - 1].softmax(dim=-1)
-    token_id = joined_ids[idx]
-    token = tokenizer.decode(token_id)
-    token_loss = -probs[token_id].log().item()
-    most_likely_token_id = probs.argmax()
-    print(idx, token, token_loss, tokenizer.decode(most_likely_token_id))
-    spans.append(dict(
-        start=length_so_far,
-        end=length_so_far + len(token),
-        token=token,
-        token_loss=token_loss,
-        most_likely_token=tokenizer.decode(most_likely_token_id)
-    ))
-    length_so_far += len(token)
+    doc_ids = tokenizer(doc, return_tensors='pt')['input_ids'][0]
+    joined_ids = torch.cat([tokenized_chat, doc_ids[1:]])
+
+    # Call the model
+    with torch.no_grad():
+        logits = model(joined_ids[None].to(model.device)).logits[0].cpu()
+
+    spans = []
+    length_so_far = 0
+    for idx in range(len(tokenized_chat), len(joined_ids)):
+        probs = logits[idx - 1].softmax(dim=-1)
+        token_id = joined_ids[idx]
+        token = tokenizer.decode(token_id)
+        token_loss = -probs[token_id].log().item()
+        most_likely_token_id = probs.argmax()
+        print(idx, token, token_loss, tokenizer.decode(most_likely_token_id))
+        spans.append(dict(
+            start=length_so_far,
+            end=length_so_far + len(token),
+            token=token,
+            token_loss=token_loss,
+            most_likely_token=tokenizer.decode(most_likely_token_id)
+        ))
+        length_so_far += len(token)
+    return spans
+
+def get_highlights_api(prompt, doc):
+    # Make a request to the API. prompt and doc are query parameters:
+    # https://tools.kenarnold.org/api/highlights?prompt=Rewrite%20this%20document&doc=This%20is%20a%20document
+    # The response is a JSON array
+    import requests
+    response = requests.get("https://tools.kenarnold.org/api/highlights", params=dict(prompt=prompt, doc=doc))
+    return response.json()['highlights']
+
+if model_name == 'API':
+    spans = get_highlights_api(prompt, doc)
+else:
+    spans = get_spans_local(prompt, doc)
 
 highest_loss = max(span['token_loss'] for span in spans[1:])
 for span in spans:
@@ -79,4 +96,4 @@ html = f"<p style=\"background: white;\">{html}</p>"
 
 st.subheader("Rewritten document")
 st.write(html, unsafe_allow_html=True)
-st.write(pd.DataFrame(spans))
+st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
