@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import pandas as pd
+import html
 
 model_options = [
     'API',
@@ -91,7 +92,7 @@ for span in spans:
 html = ''
 for span in spans:
     b = int(256 * span["token_loss"] / highest_loss)
-    html += f'<span style="color: rgba(128, 128, {b:d})" title="{span["most_likely_token"]}">{span["token"]}</span>'
+    html += f'<span style="color: rgba(128, 128, {b:d})" title="{html.escape(span["most_likely_token"])}">{html.escape(span["token"])}</span>'
 html = f"<p style=\"background: white;\">{html}</p>"
 
 st.subheader("Rewritten document")
