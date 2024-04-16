@@ -89,12 +89,12 @@ highest_loss = max(span['token_loss'] for span in spans[1:])
 for span in spans:
     span['loss_ratio'] = span['token_loss'] / highest_loss
 
-html = ''
+html_out = ''
 for span in spans:
     b = int(256 * span["token_loss"] / highest_loss)
-    html += f'<span style="color: rgba(128, 128, {b:d})" title="{html.escape(span["most_likely_token"])}">{html.escape(span["token"])}</span>'
-html = f"<p style=\"background: white;\">{html}</p>"
+    html_out += f'<span style="color: rgba(128, 128, {b:d})" title="{html.escape(span["most_likely_token"])}">{html.escape(span["token"])}</span>'
+html_out = f"<p style=\"background: white;\">{html_out}</p>"
 
 st.subheader("Rewritten document")
-st.write(html, unsafe_allow_html=True)
+st.write(html_out, unsafe_allow_html=True)
 st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
