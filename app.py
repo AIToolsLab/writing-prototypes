@@ -92,7 +92,11 @@ for span in spans:
 html_out = ''
 for span in spans:
     is_different = span['token'] != span['most_likely_token']
-    html_out += f'<span style="color: {"red" if is_different else "black"}" title="{html.escape(span["most_likely_token"]).replace('\n', ' ')}">{html.escape(span["token"]).replace('\n', '<br>')}</span>'
+    html_out += '<span style="color: {color}" title="{title}">{orig_token}</span>'.format(
+        color="red" if is_different else "black",
+        title=html.escape(span["most_likely_token"]).replace('\n', ' '),
+        orig_token=html.escape(span["token"]).replace('\n', '<br>')
+    )
 html_out = f"<p style=\"background: white;\">{html_out}</p>"
 
 st.subheader("Rewritten document")
