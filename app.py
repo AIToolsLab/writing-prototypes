@@ -20,6 +20,7 @@ def get_tokenizer(model_name):
 
 @st.cache_resource
 def get_model(model_name):
+    import torch
     from transformers import AutoModelForCausalLM
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto', torch_dtype=torch.bfloat16)
     print(f"Loaded model, {model.num_parameters():,d} parameters.")
