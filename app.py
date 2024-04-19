@@ -28,9 +28,10 @@ def get_model(model_name):
 
 prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.")
 doc = st.text_area("Document", "This is a document that I would like to have rewritten to be more concise.")
+updated_doc = st.text_area("Updated Doc", help="Your edited document. Leave this blank to use your original document.")
 
 
-def get_spans_local(prompt, doc):
+def get_spans_local(prompt, doc, updated_doc):
     import torch
     
     tokenizer = get_tokenizer(model_name)
@@ -46,8 +47,10 @@ def get_spans_local(prompt, doc):
     tokenized_chat = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True, return_tensors="pt")[0]
     assert len(tokenized_chat.shape) == 1
 
-    doc_ids = tokenizer(doc, return_tensors='pt')['input_ids'][0]
-    joined_ids = torch.cat([tokenized_chat, doc_ids[1:]])
+    if len(updated_doc.strip()) == 0:
+        updated_doc = doc
+    updated_doc_ids = tokenizer(updated_doc, return_tensors='pt')['input_ids'][0]
+    joined_ids = torch.cat([tokenized_chat, updated_doc_ids[1:]])
 
     # Call the model
     with torch.no_grad():
@@ -72,18 +75,22 @@ def get_spans_local(prompt, doc):
         length_so_far += len(token)
     return spans
 
-def get_highlights_api(prompt, doc):
+def get_highlights_api(prompt, doc, updated_doc):
     # Make a request to the API. prompt and doc are query parameters:
     # https://tools.kenarnold.org/api/highlights?prompt=Rewrite%20this%20document&doc=This%20is%20a%20document
     # The response is a JSON array
     import requests
-    response = requests.get("https://tools.kenarnold.org/api/highlights", params=dict(prompt=prompt, doc=doc))
+    response = requests.get("https://tools.kenarnold.org/api/highlights", params=dict(prompt=prompt, doc=doc, updated_doc=updated_doc))
     return response.json()['highlights']
 
 if model_name == 'API':
-    spans = get_highlights_api(prompt, doc)
+    spans = get_highlights_api(prompt, doc, updated_doc)
 else:
-    spans = get_spans_local(prompt, doc)
+    spans = get_spans_local(prompt, doc, updated_doc)
+
+if len(spans) < 2:
+    st.write("No spans found.")
+    st.stop()
 
 highest_loss = max(span['token_loss'] for span in spans[1:])
 for span in spans:
@@ -99,6 +106,5 @@ for span in spans:
     )
 html_out = f"<p style=\"background: white;\">{html_out}</p>"
 
-st.subheader("Rewritten document")
 st.write(html_out, unsafe_allow_html=True)
 st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
