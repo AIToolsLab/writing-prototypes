@@ -3,10 +3,10 @@ import pandas as pd
 import html
 
 
-prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.", help="Instructions for what the bot should do.")
-doc = st.text_area("Document", "", help="Paste your document here.")
+prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.", placeholder="Instructions for what the bot should do.")
+doc = st.text_area("Document", "", placeholder="Paste your document here.")
 st.button("Update document")
-rewrite_in_progress = st.text_area("Rewrite in progress", key='rewrite_in_progress', value="")
+rewrite_in_progress = st.text_area("Rewrite in progress", key='rewrite_in_progress', value="", placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.")
 
 if doc.strip() == "" and rewrite_in_progress.strip() == "":
     # Allow partial rewrites as a hack to enable autocomplete from the prompt
