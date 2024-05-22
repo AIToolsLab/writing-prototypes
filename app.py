@@ -52,7 +52,6 @@ def get_spans_local(prompt, doc, updated_doc):
     updated_doc_ids = tokenizer(updated_doc, return_tensors='pt')['input_ids'][0]
     joined_ids = torch.cat([tokenized_chat, updated_doc_ids[1:]])
 
-    # Call the model
     with torch.no_grad():
         logits = model(joined_ids[None].to(model.device)).logits[0].cpu()
 
