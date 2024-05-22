@@ -8,10 +8,13 @@ model_options = [
     'google/gemma-1.1-7b-it'
 ]
 
-model_name = st.selectbox("Select a model", model_options + ['other'])
+if False:
+    model_name = st.selectbox("Select a model", model_options + ['other'])
 
-if model_name == 'other':
-    model_name = st.text_input("Enter model name", model_options[0])
+    if model_name == 'other':
+        model_name = st.text_input("Enter model name", model_options[0])
+else:
+    model_name = model_options[0]
 
 @st.cache_resource
 def get_tokenizer(model_name):
@@ -27,8 +30,8 @@ def get_model(model_name):
     return model
 
 prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.")
-doc = st.text_area("Document", "This is a document that I would like to have rewritten to be more concise.")
-updated_doc = st.text_area("Updated Doc", help="Your edited document. Leave this blank to use your original document.")
+doc = st.text_area("Document", placeholder="Paste your document here.")
+updated_doc = st.text_area("Updated Doc", placeholder="Your edited document. Leave this blank to use your original document.")
 
 
 def get_spans_local(prompt, doc, updated_doc):
