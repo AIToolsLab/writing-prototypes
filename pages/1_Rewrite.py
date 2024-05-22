@@ -3,8 +3,9 @@ import pandas as pd
 import html
 
 
-prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.")
-doc = st.text_area("Document", "", help="Paste your document here")#"Revolutionize your paradigm-shifting synergy with our cutting-edge quantum cloud solutions!")
+prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.", help="Instructions for what the bot should do.")
+doc = st.text_area("Document", "", help="Paste your document here.")
+st.button("Update document")
 rewrite_in_progress = st.text_area("Rewrite in progress", key='rewrite_in_progress', value="")
 
 if doc.strip() == "" and rewrite_in_progress.strip() == "":
