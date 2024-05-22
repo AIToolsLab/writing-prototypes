@@ -25,7 +25,11 @@ def append_token(word):
         st.session_state['rewrite_in_progress'] + word
     )
  
-for col, token in zip(st.columns(len(tokens)), tokens):
+allow_multi_word = st.checkbox("Allow multi-word predictions", value=False)
+
+for i, (col, token) in enumerate(zip(st.columns(len(tokens)), tokens)):
     with col:
-        st.button(token, on_click=append_token, args=(token,))
+        if not allow_multi_word and ' ' in token[1:]:
+            token = token[0] + token[1:].split(' ', 1)[0]
+        st.button(token, on_click=append_token, args=(token,), key=i)
  
