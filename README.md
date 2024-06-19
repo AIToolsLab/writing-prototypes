@@ -1,5 +1,5 @@
 ---
-title: Highlight Edits
+title: Writing Tools Prototypes
 emoji: 🏢
 colorFrom: yellow
 colorTo: yellow
