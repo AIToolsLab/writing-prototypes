@@ -18,9 +18,9 @@ if prompt.startswith("Rewrite this document to be"):
 elif prompt == "Other":
     prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.")
 st.write("Prompt:", prompt)
-doc = st.text_area("Document", "", placeholder="Paste your document here.")
+doc = st.text_area("Document", "", placeholder="Paste your document here.", height=300)
 st.button("Update document")
-rewrite_in_progress = st.text_area("Rewrite in progress", key='rewrite_in_progress', value="", placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.")
+rewrite_in_progress = st.text_area("Rewrite in progress", key='rewrite_in_progress', value="", placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.", height=300)
 
 if doc.strip() == "" and rewrite_in_progress.strip() == "":
     # Allow partial rewrites as a hack to enable autocomplete from the prompt
