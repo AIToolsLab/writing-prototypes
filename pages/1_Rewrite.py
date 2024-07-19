@@ -1,9 +1,23 @@
 import streamlit as st
-import pandas as pd
-import html
+import requests
 
 
-prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.", placeholder="Instructions for what the bot should do.")
+st.title("Rewrite with Predictive Text")
+
+# pick a preset prompt or "other"
+prompt_options = [
+    "Rewrite this document to be ...",
+    "Summarize this document in one sentence.",
+    "Translate this document into Spanish.",
+    "Other"
+]
+prompt = st.radio("Prompt", prompt_options, help="Instructions for what the bot should do.")
+if prompt.startswith("Rewrite this document to be"):
+    rewrite_adjs = ["clear and concise", "more detailed and engaging", "more formal and professional", "more casual and conversational", "more technical and precise", "more creative and imaginative", "more persuasive and compelling"]
+    prompt = "Rewrite this document to be " + st.radio("to be ...", rewrite_adjs) + "."
+elif prompt == "Other":
+    prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.")
+st.write("Prompt:", prompt)
 doc = st.text_area("Document", "", placeholder="Paste your document here.")
 st.button("Update document")
 rewrite_in_progress = st.text_area("Rewrite in progress", key='rewrite_in_progress', value="", placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.")
@@ -13,7 +27,6 @@ if doc.strip() == "" and rewrite_in_progress.strip() == "":
     st.stop()
 
 def get_preds_api(prompt, original_doc, rewrite_in_progress, k=5):
-    import requests
     response = requests.get("https://tools.kenarnold.org/api/next_token", params=dict(prompt=prompt, original_doc=original_doc, doc_in_progress=rewrite_in_progress, k=k))
     response.raise_for_status()
     return response.json()['next_tokens']
