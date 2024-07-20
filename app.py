@@ -36,24 +36,29 @@ def get_prompt(default="Rewrite this document to be more clear and concise."):
         return prompt
 
 
+@st.cache_data
+def get_preds_api(prompt, original_doc, rewrite_in_progress, k=5):
+    response = requests.get("https://tools.kenarnold.org/api/next_token", params=dict(prompt=prompt, original_doc=original_doc, doc_in_progress=rewrite_in_progress, k=k))
+    response.raise_for_status()
+    return response.json()['next_tokens']
+
+
 def rewrite_with_predictions():
     st.title("Rewrite with Predictive Text")
 
     prompt = get_prompt()
     st.write("Prompt:", prompt)
 
-    doc = st.text_area("Document", "", placeholder="Paste your document here.", height=300)
-    st.button("Update document")
-    rewrite_in_progress = st.text_area("Rewrite in progress", key='rewrite_in_progress', value="", placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.", height=300)
+    cols = st.columns(2)
+    with cols[0]:
+        doc = st.text_area("Document", "", placeholder="Paste your document here.", height=300)
+        st.button("Update document")
+    with cols[1]:
+        rewrite_in_progress = st.text_area("Rewrite in progress", key='rewrite_in_progress', value="", placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.", height=300)
 
     if doc.strip() == "" and rewrite_in_progress.strip() == "":
         # Allow partial rewrites as a hack to enable autocomplete from the prompt
         st.stop()
-
-    def get_preds_api(prompt, original_doc, rewrite_in_progress, k=5):
-        response = requests.get("https://tools.kenarnold.org/api/next_token", params=dict(prompt=prompt, original_doc=original_doc, doc_in_progress=rewrite_in_progress, k=k))
-        response.raise_for_status()
-        return response.json()['next_tokens']
 
     tokens = get_preds_api(prompt, doc, rewrite_in_progress)
 
