@@ -72,18 +72,25 @@ def rewrite_with_predictions():
             st.button(token_display, on_click=append_token, args=(token,), key=i, use_container_width=True)
     
 
+@st.cache_data
+def get_highlights(prompt, doc, updated_doc):
+    response = requests.get("https://tools.kenarnold.org/api/highlights", params=dict(prompt=prompt, doc=doc, updated_doc=updated_doc))
+    return response.json()['highlights']
+
+
 def highlight_edits():
     st.title("Highlight locations for possible edits")
-    
+
     import html
     prompt = get_prompt()
     st.write("Prompt:", prompt)
-    doc = st.text_area("Document", placeholder="Paste your document here.")
-    updated_doc = st.text_area("Updated Doc", placeholder="Your edited document. Leave this blank to use your original document.")
+    cols = st.columns(2)
+    with cols[0]:
+        doc = st.text_area("Document", "Deep learning neural network technology advances are pretty cool if you are careful to use it in ways that don't take stuff from people.", height=300)
+    with cols[1]:
+        updated_doc = st.text_area("Updated Doc", placeholder="Your edited document. Leave this blank to use your original document.", height=300)
 
-
-    response = requests.get("https://tools.kenarnold.org/api/highlights", params=dict(prompt=prompt, doc=doc, updated_doc=updated_doc))
-    spans = response.json()['highlights']
+    spans = get_highlights(prompt, doc, updated_doc)
 
     if len(spans) < 2:
         st.write("No spans found.")
@@ -93,19 +100,34 @@ def highlight_edits():
     for span in spans:
         span['loss_ratio'] = span['token_loss'] / highest_loss
 
+    num_different = sum(span['token'] != span['most_likely_token'] for span in spans)
+    loss_ratios_for_different = [span['loss_ratio'] for span in spans if span['token'] != span['most_likely_token']]
+    loss_ratios_for_different.sort(reverse=True)
+
+    if num_different == 0:
+        st.write("No possible edits found.")
+        st.stop()
+    
+    num_to_show = st.slider("Number of edits to show", 1, num_different, value=num_different // 2)
+    min_loss = loss_ratios_for_different[num_to_show - 1]
+
     html_out = ''
     for span in spans:
-        is_different = span['token'] != span['most_likely_token']
-        html_out += '<span style="color: {color}" title="{title}">{orig_token}</span>'.format(
-            color="blue" if is_different else "black",
-            title=html.escape(span["most_likely_token"]).replace('\n', ' '),
-            orig_token=html.escape(span["token"]).replace('\n', '<br>')
+        show = span['token'] != span['most_likely_token'] and span['loss_ratio'] >= min_loss
+        hover = f'<span style="position: absolute; top: -10px; left: 5px; font-size: 10px; min-width:6em; line-height: 1; color: grey; transform-origin: left; transform: rotate(-15deg)">{span["most_likely_token"]}</span>'
+        html_out += '<span style="position: relative; color: {color}" title="{title}">{hover}{orig_token}</span>'.format(
+            color="blue" if show else "black",
+            title=html.escape(span["most_likely_token"]).replace('\n', ' ') if show else '',
+            orig_token=html.escape(span["token"]).replace('\n', '<br>'),
+            hover=hover if show else ''
         )
-    html_out = f"<p style=\"background: white;\">{html_out}</p>"
+    html_out = f"<p style=\"background: white; line-height: 2.5;\">{html_out}</p>"
 
     st.write(html_out, unsafe_allow_html=True)
-    import pandas as pd
-    st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
+    if st.checkbox("Show details"):
+        import pandas as pd
+        st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
+        st.write("Token loss is the difference between the original token and the most likely token. The loss ratio is the token loss divided by the highest token loss in the document.")
 
 
 rewrite_page = st.Page(rewrite_with_predictions, title="Rewrite with predictions", icon="📝")
