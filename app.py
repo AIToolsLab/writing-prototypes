@@ -73,6 +73,8 @@ def rewrite_with_predictions():
     
 
 def highlight_edits():
+    st.title("Highlight locations for possible edits")
+    
     import html
     prompt = get_prompt()
     st.write("Prompt:", prompt)
