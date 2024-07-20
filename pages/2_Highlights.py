@@ -2,20 +2,6 @@ import streamlit as st
 import pandas as pd
 import html
 
-model_options = [
-    'API',
-    'google/gemma-1.1-2b-it',
-    'google/gemma-1.1-7b-it'
-]
-
-if False:
-    model_name = st.selectbox("Select a model", model_options + ['other'])
-
-    if model_name == 'other':
-        model_name = st.text_input("Enter model name", model_options[0])
-else:
-    model_name = model_options[0]
-
 @st.cache_resource
 def get_tokenizer(model_name):
     from transformers import AutoTokenizer
@@ -28,11 +14,6 @@ def get_model(model_name):
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map='auto', torch_dtype=torch.bfloat16)
     print(f"Loaded model, {model.num_parameters():,d} parameters.")
     return model
-
-prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.")
-doc = st.text_area("Document", placeholder="Paste your document here.")
-updated_doc = st.text_area("Updated Doc", placeholder="Your edited document. Leave this blank to use your original document.")
-
 
 def get_spans_local(prompt, doc, updated_doc):
     import torch
@@ -76,37 +57,3 @@ def get_spans_local(prompt, doc, updated_doc):
         ))
         length_so_far += len(token)
     return spans
-
-def get_highlights_api(prompt, doc, updated_doc):
-    # Make a request to the API. prompt and doc are query parameters:
-    # https://tools.kenarnold.org/api/highlights?prompt=Rewrite%20this%20document&doc=This%20is%20a%20document
-    # The response is a JSON array
-    import requests
-    response = requests.get("https://tools.kenarnold.org/api/highlights", params=dict(prompt=prompt, doc=doc, updated_doc=updated_doc))
-    return response.json()['highlights']
-
-if model_name == 'API':
-    spans = get_highlights_api(prompt, doc, updated_doc)
-else:
-    spans = get_spans_local(prompt, doc, updated_doc)
-
-if len(spans) < 2:
-    st.write("No spans found.")
-    st.stop()
-
-highest_loss = max(span['token_loss'] for span in spans[1:])
-for span in spans:
-    span['loss_ratio'] = span['token_loss'] / highest_loss
-
-html_out = ''
-for span in spans:
-    is_different = span['token'] != span['most_likely_token']
-    html_out += '<span style="color: {color}" title="{title}">{orig_token}</span>'.format(
-        color="blue" if is_different else "black",
-        title=html.escape(span["most_likely_token"]).replace('\n', ' '),
-        orig_token=html.escape(span["token"]).replace('\n', '<br>')
-    )
-html_out = f"<p style=\"background: white;\">{html_out}</p>"
-
-st.write(html_out, unsafe_allow_html=True)
-st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
