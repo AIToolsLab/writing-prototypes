@@ -13,8 +13,9 @@ def landing():
 
 def show_token(token):
     token_display = token.replace('\n', '↵').replace('\t', '⇥')
-    if token_display.startswith("#"):
-        token_display = "\\" + token_display
+    # Escape Markdown
+    for c in "\\`*_{}[]()#+-.!":
+        token_display = token_display.replace(c, "\\" + c)
     return token_display
 
 
