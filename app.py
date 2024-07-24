@@ -19,13 +19,18 @@ def show_token(token):
     return token_display
 
 
-def get_prompt(default="Rewrite this document to be more clear and concise."):
+def get_prompt(*, include_generation_options, default="Rewrite this document to be more clear and concise."):
     # pick a preset prompt or "other"
+    generation_options = [
+        "Summarize this document in one sentence.",
+        "Translate this document into Spanish.",
+        "Write a concise essay according to this outline.",
+        "Write a detailed essay according to this outline.",
+    ]
     with st.popover("Prompt options"):
         prompt_options = [
             "Rewrite this document to be ...",
-            "Summarize this document in one sentence.",
-            "Translate this document into Spanish.",
+            *(generation_options if include_generation_options else []),
             "Other"
         ]
         prompt = st.radio("Prompt", prompt_options, help="Instructions for what the bot should do.")
@@ -47,7 +52,7 @@ def get_preds_api(prompt, original_doc, rewrite_in_progress, k=5):
 def rewrite_with_predictions():
     st.title("Rewrite with Predictive Text")
 
-    prompt = get_prompt()
+    prompt = get_prompt(include_generation_options=True)
     st.write("Prompt:", prompt)
 
     cols = st.columns(2)
@@ -88,7 +93,7 @@ def highlight_edits():
     st.title("Highlight locations for possible edits")
 
     import html
-    prompt = get_prompt()
+    prompt = get_prompt(include_generation_options=False)
     st.write("Prompt:", prompt)
     cols = st.columns(2)
     with cols[0]:
