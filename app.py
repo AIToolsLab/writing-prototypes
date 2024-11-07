@@ -5,8 +5,9 @@ def landing():
     st.title("Writing Tools Prototypes")
     st.markdown("Click one of the links below to see a prototype in action.")
 
-    st.page_link(st.Page(rewrite_with_predictions), label="Rewrite with predictions", icon="📝")
+    st.page_link(rewrite_page, label="Rewrite with predictions", icon="📝")
     st.page_link(highlight_page, label="Highlight locations for possible edits", icon="🖍️")
+    st.page_link(generate_page, label="Generate revisions", icon="🔄")
 
     st.markdown("*Note*: These services send data to a remote server for processing. The server logs requests. Don't use sensitive or identifiable information on this page.")
 
@@ -140,14 +141,36 @@ def highlight_edits():
         st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
         st.write("Token loss is the difference between the original token and the most likely token. The loss ratio is the token loss divided by the highest token loss in the document.")
 
+def get_revised_docs(prompt, doc, n):
+    response = requests.get("https://tools.kenarnold.org/api/gen_revisions", params=dict(prompt=prompt, doc=doc, n=n))
+    return response.json()
+
+
+def generate_revisions():
+    st.title("Generate revised document")
+
+    import html
+    prompt = get_prompt(include_generation_options=False)
+    st.write("Prompt:", prompt)
+    doc = st.text_area("Document", "", height=300)
+
+    revised_docs = get_revised_docs(prompt, doc, n=5)['revised_docs']
+
+    tabs = st.tabs([f"Draft {i+1}" for i in range(len(revised_docs))])
+    for i, tab in enumerate(tabs):
+        with tab:
+            st.write(revised_docs[i]['doc_text'])
+
 
 rewrite_page = st.Page(rewrite_with_predictions, title="Rewrite with predictions", icon="📝")
 highlight_page = st.Page(highlight_edits, title="Highlight locations for possible edits", icon="🖍️")
+generate_page = st.Page(generate_revisions, title="Generate revisions", icon="🔄")
 
 # Manually specify the sidebar
 page = st.navigation([
     st.Page(landing, title="Home", icon="🏠"),
+    highlight_page,
     rewrite_page,
-    highlight_page
+    generate_page
 ])
 page.run()
