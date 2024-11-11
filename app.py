@@ -62,6 +62,8 @@ def rewrite_with_predictions():
         st.button("Update document")
     with cols[1]:
         rewrite_in_progress = st.text_area("Rewrite in progress", key='rewrite_in_progress', value="", placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.", height=300)
+        # strip spaces (but not newlines) to avoid a tokenization issue
+        rewrite_in_progress = rewrite_in_progress.rstrip(' ')
 
     if doc.strip() == "" and rewrite_in_progress.strip() == "":
         # Allow partial rewrites as a hack to enable autocomplete from the prompt
@@ -71,7 +73,7 @@ def rewrite_with_predictions():
 
     def append_token(word):
         st.session_state['rewrite_in_progress'] = (
-            st.session_state['rewrite_in_progress'] + word
+            rewrite_in_progress + word
         )
     
     allow_multi_word = st.checkbox("Allow multi-word predictions", value=False)
