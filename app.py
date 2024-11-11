@@ -130,7 +130,7 @@ def highlight_edits():
         show = span['token'] != span['most_likely_token'] and span['loss_ratio'] >= min_loss
         hover = f'<span style="position: absolute; top: -10px; left: 5px; font-size: 10px; min-width:6em; line-height: 1; color: grey; transform-origin: left; transform: rotate(-15deg)">{span["most_likely_token"]}</span>'
         html_out += '<span style="position: relative; color: {color}" title="{title}">{hover}{orig_token}</span>'.format(
-            color="blue" if show else "black",
+            color="green" if show else "black",
             title=html.escape(span["most_likely_token"]).replace('\n', ' ') if show else '',
             orig_token=html.escape(span["token"]).replace('\n', '<br>'),
             hover=hover if show else ''
