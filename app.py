@@ -98,22 +98,12 @@ def highlight_edits():
     import html
     prompt = get_prompt(include_generation_options=False)
     st.write("Prompt:", prompt)
-    doc = st.session_state.get('doc', "")
-    if doc:
-        st.write("Generating suggestions based on the following document:")
-        st.write(doc)
-    else:
-        st.write("Enter a document to see suggestions.")
-    updated_doc = st.text_area(
+    doc = st.text_area(
         "Document",
         "Deep learning neural network technology advances are pretty cool if you are careful to use it in ways that don't take stuff from people.",
-        height=300, key='updated_doc',
+        height=150
     )
-    def save_document():
-        st.session_state['doc'] = updated_doc
-    st.button("Save document", on_click=save_document)
-
-    spans = get_highlights(prompt, doc, updated_doc)
+    spans = get_highlights(prompt, doc, doc)
 
     if len(spans) < 2:
         st.write("No spans found.")
