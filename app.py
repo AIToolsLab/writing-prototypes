@@ -28,7 +28,7 @@ def get_prompt(*, include_generation_options, default="Rewrite this document to 
         "Write a concise essay according to this outline.",
         "Write a detailed essay according to this outline.",
     ]
-    with st.popover("Prompt options"):
+    with st.popover("Edit Prompt"):
         prompt_options = [
             "Rewrite this document to be ...",
             *(generation_options if include_generation_options else []),
@@ -53,8 +53,11 @@ def get_preds_api(prompt, original_doc, rewrite_in_progress, k=5):
 def rewrite_with_predictions():
     st.title("Rewrite with Predictive Text")
 
-    prompt = get_prompt(include_generation_options=True)
-    st.write("Prompt:", prompt)
+    cols = st.columns(2)
+    with cols[0]:
+        prompt = get_prompt(include_generation_options=True)
+    with cols[1]:
+        st.write("Prompt:", prompt)
 
     cols = st.columns(2)
     with cols[0]:
@@ -93,11 +96,12 @@ def get_highlights(prompt, doc, updated_doc):
 
 
 def highlight_edits():
-    st.title("Highlight locations for possible edits")
-
     import html
-    prompt = get_prompt(include_generation_options=False)
-    st.write("Prompt:", prompt)
+    cols = st.columns([1, 4], vertical_alignment="center")
+    with cols[0]:
+        prompt = get_prompt(include_generation_options=False)
+    with cols[1]:
+        st.write("**Prompt**:", prompt)
     doc = st.text_area(
         "Document",
         "Deep learning neural network technology advances are pretty cool if you are careful to use it in ways that don't take stuff from people.",
