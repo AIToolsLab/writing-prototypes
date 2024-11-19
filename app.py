@@ -98,19 +98,20 @@ def highlight_edits():
     import html
     prompt = get_prompt(include_generation_options=False)
     st.write("Prompt:", prompt)
-    cols = st.columns(2)
-    with cols[0]:
-        def on_doc_change():
-            """Set the updated_doc to start with the original doc."""
-            st.session_state['updated_doc'] = st.session_state['doc']
-        doc = st.text_area(
-            "Document",
-            "Deep learning neural network technology advances are pretty cool if you are careful to use it in ways that don't take stuff from people.",
-            height=300, key='doc',
-            on_change=on_doc_change
-        )
-    with cols[1]:
-        updated_doc = st.text_area("Updated Doc", placeholder="Your edited document. Leave this blank to use your original document.", height=300, key='updated_doc')
+    doc = st.session_state.get('doc', "")
+    if doc:
+        st.write("Generating suggestions based on the following document:")
+        st.write(doc)
+    else:
+        st.write("Enter a document to see suggestions.")
+    updated_doc = st.text_area(
+        "Document",
+        "Deep learning neural network technology advances are pretty cool if you are careful to use it in ways that don't take stuff from people.",
+        height=300, key='updated_doc',
+    )
+    def save_document():
+        st.session_state['doc'] = updated_doc
+    st.button("Save document", on_click=save_document)
 
     spans = get_highlights(prompt, doc, updated_doc)
 
