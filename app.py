@@ -125,22 +125,29 @@ def highlight_edits():
         st.write("No possible edits found.")
         st.stop()
     
-    num_to_show = st.slider("Number of edits to show", 1, num_different, value=num_different // 2)
+    output_container = st.container(border=True)
+    
+    with st.expander("Controls"):
+        num_to_show = st.slider("Number of edits to show", 1, num_different, value=num_different // 2)
+        show_alternatives = st.checkbox("Show alternatives", value=True)
     min_loss = loss_ratios_for_different[num_to_show - 1]
 
     html_out = ''
     for span in spans:
         show = span['token'] != span['most_likely_token'] and span['loss_ratio'] >= min_loss
+        show_alternative = show and show_alternatives
         hover = f'<span style="position: absolute; top: -10px; left: 5px; font-size: 10px; min-width:6em; line-height: 1; color: grey; transform-origin: left; transform: rotate(-15deg)">{span["most_likely_token"]}</span>'
         html_out += '<span style="position: relative; color: {color}" title="{title}">{hover}{orig_token}</span>'.format(
             color="green" if show else "black",
-            title=html.escape(span["most_likely_token"]).replace('\n', ' ') if show else '',
+            title=html.escape(span["most_likely_token"]).replace('\n', ' ') if show_alternative else '',
             orig_token=html.escape(span["token"]).replace('\n', '<br>'),
-            hover=hover if show else ''
+            hover=hover if show_alternative else ''
         )
     html_out = f"<p style=\"background: white; line-height: 2.5;\">{html_out}</p>"
 
-    st.write(html_out, unsafe_allow_html=True)
+    with output_container:
+        st.write(html_out, unsafe_allow_html=True)
+
     if st.checkbox("Show details"):
         import pandas as pd
         st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
