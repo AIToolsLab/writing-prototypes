@@ -129,29 +129,35 @@ def highlight_edits():
     with st.expander("Controls"):
         num_to_show = st.slider("Number of edits to show", 1, num_different, value=num_different // 2)
         show_alternatives = st.checkbox("Show alternatives", value=True)
+        if show_alternatives:
+            show_all_on_hover = st.checkbox("Show all alternatives on hover", value=False)
+        else:
+            show_all_on_hover = False
     min_loss = loss_ratios_for_different[num_to_show - 1]
 
     with output_container:
-        highlights_component(spans, show_alternatives, min_loss)
+        highlights_component(spans, show_alternatives, min_loss, show_all_on_hover=show_all_on_hover)
 
     if st.checkbox("Show details"):
         import pandas as pd
         st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
         st.write("Token loss is the difference between the original token and the most likely token. The loss ratio is the token loss divided by the highest token loss in the document.")
 
-def highlights_component(spans, show_alternatives, min_loss):
+def highlights_component(spans, show_alternatives, min_loss, show_all_on_hover=False):
     import streamlit.components.v1 as components
     import html
 
     html_out = ''
     for span in spans:
         show = span['token'] != span['most_likely_token'] and span['loss_ratio'] >= min_loss
+        alternative_to_show = next(token for token in span['topk_tokens'] if token != span['token'])
+        print(span['topk_tokens'])
         show_alternative = show and show_alternatives
-        hover = f'<span class="alternative">{span["most_likely_token"]}</span>'
+        hover = f'<span class="alternative">{alternative_to_show}</span>'
         html_out += '<span style="color: {color}" >{hover}{orig_token}</span>'.format(
             color="grey" if show else "black",
             orig_token=html.escape(span["token"]).replace('\n', '<br>'),
-            hover=hover if show_alternative else ''
+            hover=hover if show_all_on_hover or show_alternative else ''
         )
     html_out = f"""
     <style>
