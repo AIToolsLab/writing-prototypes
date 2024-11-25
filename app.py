@@ -96,7 +96,6 @@ def get_highlights(prompt, doc, updated_doc):
 
 
 def highlight_edits():
-    import html
     cols = st.columns([1, 4], vertical_alignment="center")
     with cols[0]:
         prompt = get_prompt(include_generation_options=False)
@@ -132,6 +131,18 @@ def highlight_edits():
         show_alternatives = st.checkbox("Show alternatives", value=True)
     min_loss = loss_ratios_for_different[num_to_show - 1]
 
+    with output_container:
+        highlights_component(spans, show_alternatives, min_loss)
+
+    if st.checkbox("Show details"):
+        import pandas as pd
+        st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
+        st.write("Token loss is the difference between the original token and the most likely token. The loss ratio is the token loss divided by the highest token loss in the document.")
+
+def highlights_component(spans, show_alternatives, min_loss):
+    import streamlit.components.v1 as components
+    import html
+
     html_out = ''
     for span in spans:
         show = span['token'] != span['most_likely_token'] and span['loss_ratio'] >= min_loss
@@ -144,14 +155,8 @@ def highlight_edits():
             hover=hover if show_alternative else ''
         )
     html_out = f"<p style=\"background: white; line-height: 2.5;\">{html_out}</p>"
-
-    with output_container:
-        st.write(html_out, unsafe_allow_html=True)
-
-    if st.checkbox("Show details"):
-        import pandas as pd
-        st.write(pd.DataFrame(spans)[['token', 'token_loss', 'most_likely_token', 'loss_ratio']])
-        st.write("Token loss is the difference between the original token and the most likely token. The loss ratio is the token loss divided by the highest token loss in the document.")
+    return st.html(html_out)
+    
 
 def get_revised_docs(prompt, doc, n):
     response = requests.get("https://tools.kenarnold.org/api/gen_revisions", params=dict(prompt=prompt, doc=doc, n=n))
