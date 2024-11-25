@@ -148,8 +148,8 @@ def highlights_component(spans, show_alternatives, min_loss):
         show = span['token'] != span['most_likely_token'] and span['loss_ratio'] >= min_loss
         show_alternative = show and show_alternatives
         hover = f'<span class="alternative">{span["most_likely_token"]}</span>'
-        html_out += '<span style="position: relative; color: {color}" title="{title}">{hover}{orig_token}</span>'.format(
-            color="green" if show else "black",
+        html_out += '<span style="color: {color}" title="{title}">{hover}{orig_token}</span>'.format(
+            color="grey" if show else "black",
             title=html.escape(span["most_likely_token"]).replace('\n', ' ') if show_alternative else '',
             orig_token=html.escape(span["token"]).replace('\n', '<br>'),
             hover=hover if show_alternative else ''
@@ -160,16 +160,20 @@ def highlights_component(spans, show_alternatives, min_loss):
             background: white;
             line-height: 2.5;
         }}
+        p.highlights-container > span {{
+            position: relative;
+        }}
         p.highlights-container .alternative {{
+            display: none;
+        }}
+        p.highlights-container > span:hover .alternative {{
+            display: inline;
             position: absolute; 
-            top: -10px; 
+            top: -12px; 
             left: 5px; 
-            font-size: 10px; 
-            min-width:6em; 
+            min-width: 6em; 
             line-height: 1; 
-            color: grey; 
-            transform-origin: 
-            left; transform: rotate(-15deg);
+            color: green; 
         }}
     </style>
     <p class="highlights-container">{html_out}</p>
