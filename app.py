@@ -148,9 +148,8 @@ def highlights_component(spans, show_alternatives, min_loss):
         show = span['token'] != span['most_likely_token'] and span['loss_ratio'] >= min_loss
         show_alternative = show and show_alternatives
         hover = f'<span class="alternative">{span["most_likely_token"]}</span>'
-        html_out += '<span style="color: {color}" title="{title}">{hover}{orig_token}</span>'.format(
+        html_out += '<span style="color: {color}" >{hover}{orig_token}</span>'.format(
             color="grey" if show else "black",
-            title=html.escape(span["most_likely_token"]).replace('\n', ' ') if show_alternative else '',
             orig_token=html.escape(span["token"]).replace('\n', '<br>'),
             hover=hover if show_alternative else ''
         )
@@ -173,7 +172,7 @@ def highlights_component(spans, show_alternatives, min_loss):
             left: 5px; 
             min-width: 6em; 
             line-height: 1; 
-            color: green; 
+            color: blue; 
         }}
     </style>
     <p class="highlights-container">{html_out}</p>
