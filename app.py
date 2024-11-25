@@ -154,7 +154,15 @@ def highlights_component(spans, show_alternatives, min_loss):
             orig_token=html.escape(span["token"]).replace('\n', '<br>'),
             hover=hover if show_alternative else ''
         )
-    html_out = f"<p style=\"background: white; line-height: 2.5;\">{html_out}</p>"
+    html_out = f"""
+    <style>
+        p.highlights-container {{
+            background: white;
+            line-height: 2.5;
+        }}
+    </style>
+    <p class="highlights-container">{html_out}</p>
+    """
     return st.html(html_out)
     
 
