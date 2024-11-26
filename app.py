@@ -151,7 +151,6 @@ def highlights_component(spans, show_alternatives, min_loss, show_all_on_hover=F
     for span in spans:
         show = span['token'] != span['most_likely_token'] and span['loss_ratio'] >= min_loss
         alternative_to_show = next(token for token in span['topk_tokens'] if token != span['token'])
-        print(span['topk_tokens'])
         show_alternative = show and show_alternatives
         hover = f'<span class="alternative">{alternative_to_show}</span>'
         html_out += '<span style="color: {color}" >{hover}{orig_token}</span>'.format(
