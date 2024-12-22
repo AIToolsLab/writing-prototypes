@@ -1,6 +1,8 @@
 import streamlit as st
 import requests
 
+API_SERVER = "https://tools.kenarnold.org/api"
+
 def landing():
     st.title("Writing Tools Prototypes")
     st.markdown("Click one of the links below to see a prototype in action.")
@@ -8,6 +10,7 @@ def landing():
     st.page_link(rewrite_page, label="Rewrite with predictions", icon="📝")
     st.page_link(highlight_page, label="Highlight locations for possible edits", icon="🖍️")
     st.page_link(generate_page, label="Generate revisions", icon="🔄")
+    st.page_link(type_assistant_response_page, label="Type Assistant Response", icon="🔤")
 
     st.markdown("*Note*: These services send data to a remote server for processing. The server logs requests. Don't use sensitive or identifiable information on this page.")
 
@@ -205,16 +208,72 @@ def generate_revisions():
         with tab:
             st.write(revised_docs[i]['doc_text'])
 
+def type_assistant_response():
+    if 'messages' not in st.session_state:
+        st.session_state['messages'] = []
+    messages = st.session_state.messages
+
+    for message in st.session_state.messages[:-1]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input(""):
+        # Display user message in chat message container
+        with st.chat_message("user"):
+            st.markdown(prompt)
+        # Add user message to chat history
+        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "assistant", "content": ""})
+
+    if len(messages) == 0:
+        st.stop()
+
+    response = requests.post(
+        f"{API_SERVER}/continue_messages",
+        json={
+            "messages": messages,
+            "n_branch_tokens": 5,
+            "n_future_tokens": 2
+        }
+    )
+    if response.status_code != 200:
+        st.error("Error fetching response")
+        st.write(response.text)
+        st.stop()
+    response.raise_for_status()
+    response = response.json()
+
+    # Display assistant response in chat message container
+    with st.chat_message("assistant"):
+        st.write(messages[-1]['content'])
+        def append_token(word):
+            messages[-1]['content'] = (
+                messages[-1]['content'] + word
+            )
+        
+        allow_multi_word = st.checkbox("Allow multi-word predictions", value=False)
+
+        continuations = response['continuations']
+        for i, (col, continuation) in enumerate(zip(st.columns(len(continuations)), continuations)):
+            token = continuation['doc_text']
+            with col:
+                if not allow_multi_word and ' ' in token[1:]:
+                    token = token[0] + token[1:].split(' ', 1)[0]
+                token_display = show_token(token)
+                st.button(token_display, on_click=append_token, args=(token,), key=i, use_container_width=True)
+        
 
 rewrite_page = st.Page(rewrite_with_predictions, title="Rewrite with predictions", icon="📝")
 highlight_page = st.Page(highlight_edits, title="Highlight locations for possible edits", icon="🖍️")
 generate_page = st.Page(generate_revisions, title="Generate revisions", icon="🔄")
+type_assistant_response_page = st.Page(type_assistant_response, title="Type Assistant Response", icon="🔤")
 
 # Manually specify the sidebar
 page = st.navigation([
     st.Page(landing, title="Home", icon="🏠"),
     highlight_page,
     rewrite_page,
-    generate_page
+    generate_page,
+    type_assistant_response_page
 ])
 page.run()
