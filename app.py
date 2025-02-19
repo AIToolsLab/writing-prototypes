@@ -213,6 +213,7 @@ def type_assistant_response():
         st.session_state['messages'] = []
     messages = st.session_state.messages
 
+    # All but the last message happens normally.
     for message in st.session_state.messages[:-1]:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -228,30 +229,36 @@ def type_assistant_response():
     if len(messages) == 0:
         st.stop()
 
-    response = requests.post(
-        f"{API_SERVER}/continue_messages",
-        json={
-            "messages": messages,
-            "n_branch_tokens": 5,
-            "n_future_tokens": 2
-        }
-    )
-    if response.status_code != 200:
-        st.error("Error fetching response")
-        st.write(response.text)
-        st.stop()
-    response.raise_for_status()
-    response = response.json()
-
     # Display assistant response in chat message container
     with st.chat_message("assistant"):
-        st.write(messages[-1]['content'])
+        #st.write(messages[-1]['content'])
+        msg_in_progress = st.text_area("Assistant response", value=messages[-1]['content'], placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.", height=300)
+        # strip spaces (but not newlines) to avoid a tokenization issue
+        msg_in_progress = msg_in_progress.rstrip(' ')
+
         def append_token(word):
             messages[-1]['content'] = (
-                messages[-1]['content'] + word
+                msg_in_progress + word
             )
         
         allow_multi_word = st.checkbox("Allow multi-word predictions", value=False)
+
+        response = requests.post(
+            f"{API_SERVER}/continue_messages",
+            json={
+                "messages": messages[:-1] + [
+                    {"role": "assistant", "content": msg_in_progress},
+                ],
+                "n_branch_tokens": 5,
+                "n_future_tokens": 2
+            }
+        )
+        if response.status_code != 200:
+            st.error("Error fetching response")
+            st.write(response.text)
+            st.stop()
+        response.raise_for_status()
+        response = response.json()
 
         continuations = response['continuations']
         for i, (col, continuation) in enumerate(zip(st.columns(len(continuations)), continuations)):
@@ -259,6 +266,15 @@ def type_assistant_response():
             with col:
                 if not allow_multi_word and ' ' in token[1:]:
                     token = token[0] + token[1:].split(' ', 1)[0]
+
+                # if not allow_multi_word:
+                #     import re
+                #     split_result = re.split(r'(\s+)', token, maxsplit=1)
+                #     assert len(split_result) == 3
+                #     before_ws, token, after_ws = split_result
+                #     print(repr(split_result))
+                #     if before_ws != '':
+                #         token = before_ws
                 token_display = show_token(token)
                 st.button(token_display, on_click=append_token, args=(token,), key=i, use_container_width=True)
         
