@@ -3,9 +3,23 @@ name = "writing-prototypes"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.13" 
 dependencies = [
+    "fastapi>=0.115.8",
     "pandas>=2.2.3",
+    "pydantic>=2.10.6",
     "requests>=2.32.3",
     "streamlit==1.40.1",
+]
+
+[dependency-groups]
+gpu = [
+    "accelerate>=1.1.1",
+    "torch>=2.5.1",
+    "transformers>=4.46.2",
+    "tokenizers>=0.21.0",
+]
+dev = [
+    "ipython>=8.32.0",
+    "marimo>=0.10.6",
 ]

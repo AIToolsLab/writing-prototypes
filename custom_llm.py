@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from pydantic import BaseModel
 import torch
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -12,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from custom_llm_inference import get_highlights_inner, get_next_token_predictions_inner
+from custom_llm_inference import get_highlights_inner, get_next_token_predictions_inner, continue_messages_inner
 
 ml_models = {}
 
@@ -36,7 +37,12 @@ async def models_lifespan(app: FastAPI):
 
     ml_models["llm"] = llm = {
         'tokenizer': AutoTokenizer.from_pretrained(model_name),
-        'model': AutoModelForCausalLM.from_pretrained(model_name, device_map="auto" if USE_GPU else "cpu", torch_dtype=dtype)
+        'model': AutoModelForCausalLM.from_pretrained(
+            model_name,
+            device_map="auto" if USE_GPU else "cpu",
+            torch_dtype=dtype,
+            attn_implementation='eager'
+        )
     }
     print("Loaded llm with device map:")
     print(llm['model'].hf_device_map)
@@ -61,7 +67,7 @@ async def models_lifespan(app: FastAPI):
     
     start = time.time()
     response = client.get("/api/gen_revisions",
-        params={"doc": test_doc, "prompt": test_prompt, "n": 1})
+        params={"doc": test_doc, "prompt": test_prompt, "n": 1, "max_length": 16})
     print(f"Gen revisions endpoint: {time.time() - start:.2f}s")
 
     yield
@@ -132,7 +138,9 @@ def get_next_token_predictions(original_doc: str,
 def gen_revisions(
         prompt: str,
         doc: str,
-        n: Optional[int] = 5):
+        n: Optional[int] = 5,
+        max_length: Optional[int] = 1024,
+        ):
 
 
     model = ml_models['llm']['model']
@@ -148,7 +156,7 @@ def gen_revisions(
 
     generations = model.generate(
         tokenized_chat, num_return_sequences=n,
-        max_length=1024, do_sample=True, top_k=50, top_p=0.95, temperature=0.5,
+        max_new_tokens=max_length, do_sample=True, top_k=50, top_p=0.95, temperature=0.5,
         return_dict_in_generate=True, output_scores=True)
     generated_docs = tokenizer.batch_decode(generations.sequences, skip_special_tokens=True)
     #print(generations.scores)
@@ -164,6 +172,36 @@ def gen_revisions(
     return {
         'revised_docs': [dict(doc_text=doc[prompt_length:]) for doc in generated_docs]
     }
+
+
+class Message(BaseModel):
+    role: str
+    content: str
+
+class ContinueMessagesRequest(BaseModel):
+    messages: List[Message]
+    n_branch_tokens: int = 5
+    n_future_tokens: int = 5
+
+
+@app.post('/api/continue_messages')
+def continue_messages(request: ContinueMessagesRequest):
+
+    messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    if len(messages) == 0:
+        raise HTTPException(status_code=400, detail="At least one message must be provided.")
+    n_branch_tokens = request.n_branch_tokens
+    n_future_tokens = request.n_future_tokens
+
+    model = ml_models['llm']['model']
+    tokenizer = ml_models['llm']['tokenizer']
+
+    generated_docs = continue_messages_inner(model, tokenizer, messages, n_branch_tokens, n_future_tokens)
+
+    return {
+        'continuations': [dict(doc_text=doc) for doc in generated_docs]
+    }
+
 
 
 if __name__ == "__main__":
