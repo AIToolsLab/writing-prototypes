@@ -42,7 +42,7 @@ def get_prompt(*, include_generation_options, default="Rewrite this document to 
             rewrite_adjs = ["clear and concise", "more detailed and engaging", "more formal and professional", "more casual and conversational", "more technical and precise", "more creative and imaginative", "more persuasive and compelling"]
             prompt = "Rewrite this document to be " + st.radio("to be ...", rewrite_adjs) + "."
         elif prompt == "Other":
-            prompt = st.text_area("Prompt", "Rewrite this document to be more clear and concise.")
+            prompt = st.text_area("Prompt", "Rewrite this document to be clear and concise.")
         return prompt
 
 
