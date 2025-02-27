@@ -15,11 +15,11 @@ def landing():
     st.markdown("*Note*: These services send data to a remote server for processing. The server logs requests. Don't use sensitive or identifiable information on this page.")
 
 
-def show_token(token):
+def show_token(token: str, escape_markdown=True) -> str:
     token_display = token.replace('\n', '↵').replace('\t', '⇥')
-    # Escape Markdown
-    for c in "\\`*_{}[]()#+-.!":
-        token_display = token_display.replace(c, "\\" + c)
+    if escape_markdown:
+        for c in "\\`*_{}[]()#+-.!":
+            token_display = token_display.replace(c, "\\" + c)
     return token_display
 
 
@@ -155,7 +155,7 @@ def highlights_component(spans, show_alternatives, min_loss, show_all_on_hover=F
         show = span['token'] != span['most_likely_token'] and span['loss_ratio'] >= min_loss
         alternative_to_show = next(token for token in span['topk_tokens'] if token != span['token'])
         show_alternative = show and show_alternatives
-        hover = f'<span class="alternative">{alternative_to_show}</span>'
+        hover = f'<span class="alternative">{show_token(alternative_to_show, escape_markdown=False)}</span>'
         html_out += '<span style="color: {color}" >{hover}{orig_token}</span>'.format(
             color="grey" if show else "black",
             orig_token=html.escape(span["token"]).replace('\n', '<br>'),
