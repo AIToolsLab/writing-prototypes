@@ -209,35 +209,33 @@ def generate_revisions():
             st.write(revised_docs[i]['doc_text'])
 
 def type_assistant_response():
-    if 'messages' not in st.session_state:
-        st.session_state['messages'] = []
+    if 'messages' not in st.session_state or st.button("Start a new conversation"):
+        st.session_state['messages'] = [{"role": "user", "content": ""}]
+        st.session_state['msg_in_progress'] = ""
     messages = st.session_state.messages
 
-    # All but the last message happens normally.
-    for message in st.session_state.messages[:-1]:
+    def rewind_to(i):
+        st.session_state.messages = st.session_state.messages[:i+1]
+        st.session_state['msg_in_progress'] = st.session_state.messages[-1]['content']
+
+    for i, message in enumerate(st.session_state.messages[:-1]):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+            st.button("Edit", on_click=rewind_to, args=(i,))
 
-    if prompt := st.chat_input(""):
-        # Display user message in chat message container
-        with st.chat_message("user"):
-            st.markdown(prompt)
-        # Add user message to chat history
-        messages.append({"role": "user", "content": prompt})
-        messages.append({"role": "assistant", "content": ""})
+    # Display message-in-progress in chat message container
+    last_role = messages[-1]["role"]
+    with st.chat_message(last_role):
+        label = "Your message" if last_role == "user" else "Assistant response"
+        msg_in_progress = st.text_area(label, placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.", height=300, key="msg_in_progress")
+        if msg_in_progress is None:
+            msg_in_progress = ""
 
-    if len(messages) == 0:
-        st.stop()
-
-    # Display assistant response in chat message container
-    with st.chat_message("assistant"):
-        #st.write(messages[-1]['content'])
-        msg_in_progress = st.text_area("Assistant response", value=messages[-1]['content'], placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.", height=300)
-        # strip spaces (but not newlines) to avoid a tokenization issue
-        msg_in_progress = msg_in_progress.rstrip(' ')
+        messages[-1]['content'] = msg_in_progress
+        print(messages)
 
         def append_token(word):
-            messages[-1]['content'] = (
+            messages[-1]['content'] = st.session_state['msg_in_progress'] = (
                 msg_in_progress + word
             )
         
@@ -246,9 +244,7 @@ def type_assistant_response():
         response = requests.post(
             f"{API_SERVER}/continue_messages",
             json={
-                "messages": messages[:-1] + [
-                    {"role": "assistant", "content": msg_in_progress},
-                ],
+                "messages": messages,
                 "n_branch_tokens": 5,
                 "n_future_tokens": 2
             }
@@ -277,6 +273,12 @@ def type_assistant_response():
                 #         token = before_ws
                 token_display = show_token(token)
                 st.button(token_display, on_click=append_token, args=(token,), key=i, use_container_width=True)
+        
+        if st.button("Send"):
+            other_role = "assistant" if last_role == "user" else "user"
+            messages.append({"role": other_role, "content": ""})
+            st.session_state['msg_in_progress'] = ""
+            st.session_state.messages = messages
         
 
 rewrite_page = st.Page(rewrite_with_predictions, title="Rewrite with predictions", icon="📝")
