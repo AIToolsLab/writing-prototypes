@@ -221,7 +221,7 @@ def type_assistant_response():
     for i, message in enumerate(st.session_state.messages[:-1]):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-            st.button("Edit", on_click=rewind_to, args=(i,))
+            st.button("Edit", on_click=rewind_to, args=(i,), key=f"rewind_to_{i}")
 
     # Display message-in-progress in chat message container
     last_role = messages[-1]["role"]
