@@ -274,11 +274,11 @@ def type_assistant_response():
                 token_display = show_token(token)
                 st.button(token_display, on_click=append_token, args=(token,), key=i, use_container_width=True)
         
-        if st.button("Send"):
+        def send_message():
             other_role = "assistant" if last_role == "user" else "user"
-            messages.append({"role": other_role, "content": ""})
+            st.session_state['messages'].append({"role": other_role, "content": ""})
             st.session_state['msg_in_progress'] = ""
-            st.session_state.messages = messages
+        st.button("Send", on_click=send_message)
         
 
 rewrite_page = st.Page(rewrite_with_predictions, title="Rewrite with predictions", icon="📝")
