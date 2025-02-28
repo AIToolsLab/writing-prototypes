@@ -232,7 +232,6 @@ def type_assistant_response():
             msg_in_progress = ""
 
         messages[-1]['content'] = msg_in_progress
-        print(messages)
 
         def append_token(word):
             messages[-1]['content'] = st.session_state['msg_in_progress'] = (
