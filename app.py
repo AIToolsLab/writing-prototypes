@@ -156,8 +156,8 @@ def highlights_component(spans, show_alternatives, min_loss, show_all_on_hover=F
         alternative_to_show = next(token for token in span['topk_tokens'] if token != span['token'])
         show_alternative = show and show_alternatives
         hover = f'<span class="alternative">{show_token(alternative_to_show, escape_markdown=False)}</span>'
-        html_out += '<span style="color: {color}" >{hover}{orig_token}</span>'.format(
-            color="grey" if show else "black",
+        html_out += '<span class="{cls}">{hover}{orig_token}</span>'.format(
+            cls="highlight" if show else "regular",
             orig_token=html.escape(span["token"]).replace('\n', '<br>'),
             hover=hover if show_all_on_hover or show_alternative else ''
         )
@@ -166,9 +166,19 @@ def highlights_component(spans, show_alternatives, min_loss, show_all_on_hover=F
         p.highlights-container {{
             background: white;
             line-height: 2.5;
+            color: #2C3E50;  /* Dark blue-grey for main text */
         }}
         p.highlights-container > span {{
             position: relative;
+            padding: 2px 1px;
+            border-radius: 3px;
+        }}
+        p.highlights-container > span.highlight {{
+            background-color: #E8F5E9;  /* Very light green */
+            border-bottom: 2px solid #81C784;  /* Medium green */
+        }}
+        p.highlights-container > span.regular {{
+            color: #546E7A;  /* Muted blue-grey */
         }}
         p.highlights-container .alternative {{
             display: none;
@@ -176,11 +186,18 @@ def highlights_component(spans, show_alternatives, min_loss, show_all_on_hover=F
         p.highlights-container > span:hover .alternative {{
             display: inline;
             position: absolute; 
-            top: -12px; 
-            left: 5px; 
+            top: -24px; 
+            left: 50%;
+            transform: translateX(-50%);
             min-width: 6em; 
-            line-height: 1; 
-            color: blue; 
+            text-align: center;
+            line-height: 1.2; 
+            color: #1976D2;  /* Clear blue */
+            background: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            border: 1px solid #E0E0E0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }}
     </style>
     <p class="highlights-container">{html_out}</p>
