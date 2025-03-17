@@ -296,11 +296,112 @@ def type_assistant_response():
             st.session_state['msg_in_progress'] = ""
         st.button("Send", on_click=send_message)
         
+def show_internals():
+    if 'messages' not in st.session_state or st.button("Start a new conversation"):
+        st.session_state['messages'] = [{"role": "user", "content": ""}]
+        st.session_state['msg_in_progress'] = ""
+    messages = st.session_state.messages
+
+    def rewind_to(i):
+        st.session_state.messages = st.session_state.messages[:i+1]
+        st.session_state['msg_in_progress'] = st.session_state.messages[-1]['content']
+
+    for i, message in enumerate(st.session_state.messages[:-1]):
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            st.button("Edit", on_click=rewind_to, args=(i,), key=f"rewind_to_{i}")
+
+    # Display message-in-progress in chat message container
+    last_role = messages[-1]["role"]
+    with st.chat_message(last_role):
+        label = "Your message" if last_role == "user" else "Assistant response"
+        msg_in_progress = st.text_area(label, placeholder="Clicking the buttons below will update this field. You can also edit it directly; press Ctrl+Enter to apply changes.", height=300, key="msg_in_progress")
+        if msg_in_progress is None:
+            msg_in_progress = ""
+
+        messages[-1]['content'] = msg_in_progress
+
+        def append_token(word):
+            messages[-1]['content'] = st.session_state['msg_in_progress'] = (
+                msg_in_progress + word
+            )
+        
+        response = requests.post(
+            f"{API_SERVER}/logprobs",
+            json={
+                "messages": messages,
+                "n_branch_tokens": 5,
+                "n_future_tokens": 2
+            }
+        )
+        if response.status_code != 200:
+            st.error("Error fetching response")
+            st.write(response.text)
+            st.stop()
+        response.raise_for_status()
+        response = response.json()
+
+        logprobs = response['logprobs']
+        # logprobs is a list of tokens:
+        # {
+        #     "token": "the",
+        #     "logprobs": [{"the": -0.1, "a": -0.2, ...}]
+        # }
+        #st.write(logprobs)
+        logprobs_component(logprobs)
+        
+        def send_message():
+            other_role = "assistant" if last_role == "user" else "user"
+            st.session_state['messages'].append({"role": other_role, "content": ""})
+            st.session_state['msg_in_progress'] = ""
+        st.button("Send", on_click=send_message)
+        
+def logprobs_component(logprobs):
+    import html, json
+    html_out = ''
+    for i, entry in enumerate(logprobs):
+        token = entry['token']
+        if token is not None:
+            token_to_show = html.escape(show_token(token, escape_markdown=False))
+        else:
+            token_to_show = html.escape("<empty>")
+        html_out += f'<span onclick="showLogprobs({i})" title="Click to show logprobs for this token">{token_to_show}</span>'
+    show_logprob_js = '''
+    function showLogprobs(i) {
+        const logprobs = allLogprobs[i].logprobs;
+        const logprobsHtml = Object.entries(logprobs).map(([token, logprob]) => `<li>${token}: ${Math.exp(logprob)}</li>`).join('');
+        const container = document.getElementById('logprobs-display');
+        container.innerHTML = `<ul>${logprobsHtml}</ul>`;
+    }
+'''
+    html_out = f"""
+    <script>allLogprobs = {json.dumps(logprobs)};
+    
+    {show_logprob_js}</script>
+    <style>
+        p.logprobs-container {{
+            background: white;
+            line-height: 2.5;
+            color: #2C3E50;  /* Dark blue-grey for main text */
+        }}
+        p.logprobs-container > span {{
+            position: relative;
+            padding: 2px 1px;
+            border-radius: 3px;
+        }}
+    </style>
+    <p class="logprobs-container">{html_out}</p>
+    <div id="logprobs-display"></div>
+    """
+    #return st.html(html_out)
+    import streamlit.components.v1 as components
+    return components.html(html_out, height=200, scrolling=True)
 
 rewrite_page = st.Page(rewrite_with_predictions, title="Rewrite with predictions", icon="📝")
 highlight_page = st.Page(highlight_edits, title="Highlight locations for possible edits", icon="🖍️")
 generate_page = st.Page(generate_revisions, title="Generate revisions", icon="🔄")
 type_assistant_response_page = st.Page(type_assistant_response, title="Type Assistant Response", icon="🔤")
+show_internals_page = st.Page(show_internals, title="Show Internals", icon="🔧")
 
 # Manually specify the sidebar
 page = st.navigation([
@@ -308,6 +409,7 @@ page = st.navigation([
     highlight_page,
     rewrite_page,
     generate_page,
-    type_assistant_response_page
+    type_assistant_response_page,
+    show_internals_page
 ])
 page.run()
