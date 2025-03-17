@@ -203,6 +203,59 @@ def continue_messages(request: ContinueMessagesRequest):
     }
 
 
+@app.post('/api/logprobs')
+def logprobs(request: ContinueMessagesRequest):
+
+    messages = [{"role": m.role, "content": m.content} for m in request.messages]
+    if len(messages) == 0:
+        raise HTTPException(status_code=400, detail="At least one message must be provided.")
+    n_branch_tokens = request.n_branch_tokens
+    n_future_tokens = request.n_future_tokens
+
+    model = ml_models['llm']['model']
+    tokenizer = ml_models['llm']['tokenizer']
+
+    device = model.device
+
+    tokenized_chat = tokenizer.apply_chat_template(messages, tokenize=True, return_tensors="pt", continue_final_message=True).to(model.device)
+
+    # Compute all logits
+    with torch.no_grad():
+        logits = model(tokenized_chat).logits
+
+    k = request.n_branch_tokens
+
+    # Return a list of tokens:
+    # {
+    #     "token": "the",
+    #     "logprobs": [{"the": -0.1, "a": -0.2, ...}]
+    # }
+    # logprobs are the top-k logprobs for each token, plus the chosen token in case it is not in the top-k
+    # The very first token will have no logprobs, since it is the beginning of the document
+    # The very last token will have "token" set to None, and "logprobs" will be the logprobs for the next token
+
+    all_logprobs = []
+    for idx in range(len(tokenized_chat[0]) + 1):
+        if idx == len(tokenized_chat[0]):
+            actual_token_id = None
+            token = None
+        else:
+            actual_token_id = tokenized_chat[0, idx].item()
+            token = tokenizer.decode(actual_token_id)
+        
+        if idx == 0:
+            token_logprobs = []
+        else:
+            logprobs = logits[0, idx - 1].log_softmax(dim=-1)
+            token_ids_to_return = logprobs.topk(k).indices.cpu().numpy().tolist()
+            if actual_token_id is not None and actual_token_id not in token_ids_to_return:
+                token_ids_to_return.append(actual_token_id)
+            token_logprobs = {tokenizer.decode(i): logprobs[i].item() for i in token_ids_to_return}
+        all_logprobs.append(dict(token=token, logprobs=token_logprobs))
+
+    return {
+        'logprobs': all_logprobs
+    }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="localhost", port=PORT)
