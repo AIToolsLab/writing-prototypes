@@ -365,7 +365,7 @@ def logprobs_component(logprobs):
             token_to_show = html.escape(show_token(token, escape_markdown=False))
         else:
             token_to_show = html.escape("<empty>")
-        html_out += f'<span onclick="showLogprobs({i})" title="Click to show logprobs for this token">{token_to_show}</span>'
+        html_out += f'<span style="border: 1px solid black;" onclick="showLogprobs({i})" title="Click to show logprobs for this token">{token_to_show}</span>'
     show_logprob_js = '''
     function showLogprobs(i) {
         const logprobs = allLogprobs[i].logprobs;
