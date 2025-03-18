@@ -209,15 +209,19 @@ def logprobs(request: ContinueMessagesRequest):
     messages = [{"role": m.role, "content": m.content} for m in request.messages]
     if len(messages) == 0:
         raise HTTPException(status_code=400, detail="At least one message must be provided.")
-    n_branch_tokens = request.n_branch_tokens
-    n_future_tokens = request.n_future_tokens
 
     model = ml_models['llm']['model']
     tokenizer = ml_models['llm']['tokenizer']
 
-    device = model.device
-
+    # Work around a bug when the last message is empty
+    trim_last_message = False
+    if messages[-1]['content'] == '':
+        messages[-1]['content'] = '.'
+        trim_last_message = True
     tokenized_chat = tokenizer.apply_chat_template(messages, tokenize=True, return_tensors="pt", continue_final_message=True).to(model.device)
+    if trim_last_message:
+        tokenized_chat = tokenized_chat[:, :-1]
+
 
     # Compute all logits
     with torch.no_grad():
