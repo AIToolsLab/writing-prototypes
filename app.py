@@ -366,7 +366,7 @@ def logprobs_component(logprobs):
             token_to_show = html.escape(show_token(token, escape_markdown=False))
         else:
             token_to_show = html.escape("<empty>")
-        html_out += f'<span style="border: 1px solid black;" onclick="showLogprobs({i})" title="Click to show logprobs for this token">{token_to_show}</span>'
+        html_out += f'<span style="border: 1px solid black; display: inline-block;" onclick="showLogprobs({i})" title="Click to show logprobs for this token">{token_to_show}</span>'
     show_logprob_js = '''
 const makeElt = (tag, attrs, children) => {
     const elt = document.createElement(tag);
@@ -395,8 +395,7 @@ const makeElt = (tag, attrs, children) => {
     <style>
         p.logprobs-container {{
             background: white;
-            line-height: 2.5;
-            color: #2C3E50;  /* Dark blue-grey for main text */
+            line-height: 1.5;
         }}
         p.logprobs-container > span {{
             position: relative;
@@ -412,9 +411,8 @@ const makeElt = (tag, attrs, children) => {
 showLogprobs(allLogprobs.length - 1);
 </script>
 """
-    #return st.html(html_out)
     import streamlit.components.v1 as components
-    return components.html(html_out, height=200, scrolling=True)
+    return components.html(html_out, height=300, scrolling=True)
 
 rewrite_page = st.Page(rewrite_with_predictions, title="Rewrite with predictions", icon="📝")
 highlight_page = st.Page(highlight_edits, title="Highlight locations for possible edits", icon="🖍️")
