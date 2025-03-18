@@ -326,6 +326,12 @@ def show_internals():
                 msg_in_progress + word
             )
         
+        def send_message():
+            other_role = "assistant" if last_role == "user" else "user"
+            st.session_state['messages'].append({"role": other_role, "content": ""})
+            st.session_state['msg_in_progress'] = ""
+        st.button("Send", on_click=send_message)
+
         response = requests.post(
             f"{API_SERVER}/logprobs",
             json={
@@ -342,21 +348,16 @@ def show_internals():
         response = response.json()
 
         logprobs = response['logprobs']
-        # logprobs is a list of tokens:
-        # {
-        #     "token": "the",
-        #     "logprobs": [{"the": -0.1, "a": -0.2, ...}]
-        # }
-        #st.write(logprobs)
+        st.write("Conversation so far as tokens (click to show logprobs):")
         logprobs_component(logprobs)
         
-        def send_message():
-            other_role = "assistant" if last_role == "user" else "user"
-            st.session_state['messages'].append({"role": other_role, "content": ""})
-            st.session_state['msg_in_progress'] = ""
-        st.button("Send", on_click=send_message)
         
 def logprobs_component(logprobs):
+    # logprobs is a list of tokens:
+    # {
+    #     "token": "the",
+    #     "logprobs": [{"the": -0.1, "a": -0.2, ...}]
+    # }
     import html, json
     html_out = ''
     for i, entry in enumerate(logprobs):
@@ -367,17 +368,30 @@ def logprobs_component(logprobs):
             token_to_show = html.escape("<empty>")
         html_out += f'<span style="border: 1px solid black;" onclick="showLogprobs({i})" title="Click to show logprobs for this token">{token_to_show}</span>'
     show_logprob_js = '''
+const makeElt = (tag, attrs, children) => {
+    const elt = document.createElement(tag);
+    for (const [attr, val] of Object.entries(attrs)) {
+        elt.setAttribute(attr, val);
+    }
+    for (const child of children) {
+        if(typeof child === 'string') {
+            elt.appendChild(document.createTextNode(child));
+        } else {
+            elt.appendChild(child);
+        }
+    }
+    return elt;
+}
+
     function showLogprobs(i) {
         const logprobs = allLogprobs[i].logprobs;
-        const logprobsHtml = Object.entries(logprobs).map(([token, logprob]) => `<li>${token}: ${Math.exp(logprob)}</li>`).join('');
         const container = document.getElementById('logprobs-display');
-        container.innerHTML = `<ul>${logprobsHtml}</ul>`;
+        container.innerHTML = '';
+        container.appendChild(makeElt('ul', {}, Object.entries(logprobs).map(([token, logprob]) => makeElt('li', {}, `${token}: ${Math.exp(logprob)}`))));
     }
 '''
     html_out = f"""
-    <script>allLogprobs = {json.dumps(logprobs)};
-    
-    {show_logprob_js}</script>
+
     <style>
         p.logprobs-container {{
             background: white;
@@ -392,7 +406,12 @@ def logprobs_component(logprobs):
     </style>
     <p class="logprobs-container">{html_out}</p>
     <div id="logprobs-display"></div>
-    """
+    <script>allLogprobs = {json.dumps(logprobs)};
+    
+    {show_logprob_js}
+showLogprobs(allLogprobs.length - 1);
+</script>
+"""
     #return st.html(html_out)
     import streamlit.components.v1 as components
     return components.html(html_out, height=200, scrolling=True)
