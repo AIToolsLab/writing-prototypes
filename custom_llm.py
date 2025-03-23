@@ -32,8 +32,16 @@ async def models_lifespan(app: FastAPI):
     #model_name = 'google/gemma-1.1-7b-it'
     #model_name = 'google/gemma-1.1-2b-it'
     model_name = 'google/gemma-2-9b-it'
+    #model_name = 'google/gemma-3-12b-it'
+    #model_name = 'google/gemma-3-4b-it'
 
-    dtype = torch.bfloat16 if USE_GPU else torch.float16
+    if USE_GPU:
+        dtype = torch.bfloat16
+        from transformers import TorchAoConfig
+        quantization_config = None#TorchAoConfig("int4_weight_only", group_size=128)
+    else:
+        dtype = torch.float16
+        quantization_config = None
 
     ml_models["llm"] = llm = {
         'tokenizer': AutoTokenizer.from_pretrained(model_name),
@@ -41,7 +49,8 @@ async def models_lifespan(app: FastAPI):
             model_name,
             device_map="auto" if USE_GPU else "cpu",
             torch_dtype=dtype,
-            attn_implementation='eager'
+            attn_implementation='eager',
+            quantization_config=quantization_config,
         )
     }
     print("Loaded llm with device map:")
