@@ -11,6 +11,7 @@ def landing():
     st.page_link(highlight_page, label="Highlight locations for possible edits", icon="🖍️")
     st.page_link(generate_page, label="Generate revisions", icon="🔄")
     st.page_link(type_assistant_response_page, label="Type Assistant Response", icon="🔤")
+    st.page_link(show_internals_page, label="Show Internals", icon="🔧")
 
     st.markdown("*Note*: These services send data to a remote server for processing. The server logs requests. Don't use sensitive or identifiable information on this page.")
 
@@ -408,17 +409,18 @@ const makeElt = (tag, attrs, children) => {
     <script>allLogprobs = {json.dumps(logprobs)};
     
     {show_logprob_js}
-showLogprobs(allLogprobs.length - 1);
+
+//showLogprobs(allLogprobs.length - 1);
 </script>
 """
     import streamlit.components.v1 as components
     return components.html(html_out, height=300, scrolling=True)
 
-rewrite_page = st.Page(rewrite_with_predictions, title="Rewrite with predictions", icon="📝")
-highlight_page = st.Page(highlight_edits, title="Highlight locations for possible edits", icon="🖍️")
-generate_page = st.Page(generate_revisions, title="Generate revisions", icon="🔄")
-type_assistant_response_page = st.Page(type_assistant_response, title="Type Assistant Response", icon="🔤")
-show_internals_page = st.Page(show_internals, title="Show Internals", icon="🔧")
+rewrite_page = st.Page(rewrite_with_predictions, title="Rewrite with predictions", icon="📝", url_path="rewrite")
+highlight_page = st.Page(highlight_edits, title="Highlight locations for possible edits", icon="🖍️", url_path="highlights")
+generate_page = st.Page(generate_revisions, title="Generate revisions", icon="🔄", url_path="generate")
+type_assistant_response_page = st.Page(type_assistant_response, title="Type Assistant Response", icon="🔤", url_path="type_assistant_response")
+show_internals_page = st.Page(show_internals, title="Show Internals", icon="🔧", url_path="internals")
 
 # Manually specify the sidebar
 page = st.navigation([
