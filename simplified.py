@@ -5,8 +5,6 @@ from transformers import DynamicCache
 
 USE_GPU = torch.cuda.is_available()
 
-API_SERVER = "https://tools.kenarnold.org/api"
-
 @st.cache_resource
 def load_model():
     import torch
