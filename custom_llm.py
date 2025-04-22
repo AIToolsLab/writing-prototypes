@@ -74,10 +74,11 @@ async def models_lifespan(app: FastAPI):
         params={"original_doc": test_doc, "prompt": test_prompt, "doc_in_progress": "This is"})
     print(f"Next token endpoint: {time.time() - start:.2f}s")
     
-    start = time.time()
-    response = client.get("/api/gen_revisions",
-        params={"doc": test_doc, "prompt": test_prompt, "n": 1, "max_length": 16})
-    print(f"Gen revisions endpoint: {time.time() - start:.2f}s")
+    if False:
+        start = time.time()
+        response = client.get("/api/gen_revisions",
+            params={"doc": test_doc, "prompt": test_prompt, "n": 1, "max_length": 16})
+        print(f"Gen revisions endpoint: {time.time() - start:.2f}s")
 
     yield
 
@@ -151,7 +152,10 @@ def gen_revisions(
         max_length: Optional[int] = 1024,
         ):
 
-
+    return {
+        'ok': False,
+        'message': 'This endpoint has been disabled.'
+    }
     model = ml_models['llm']['model']
     tokenizer = ml_models['llm']['tokenizer']
 

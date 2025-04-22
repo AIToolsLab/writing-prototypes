@@ -9,7 +9,7 @@ def landing():
 
     st.page_link(rewrite_page, label="Rewrite with predictions", icon="📝")
     st.page_link(highlight_page, label="Highlight locations for possible edits", icon="🖍️")
-    st.page_link(generate_page, label="Generate revisions", icon="🔄")
+    #st.page_link(generate_page, label="Generate revisions", icon="🔄")
     st.page_link(type_assistant_response_page, label="Type Assistant Response", icon="🔤")
 
     st.markdown("*Note*: These services send data to a remote server for processing. The server logs requests. Don't use sensitive or identifiable information on this page.")
@@ -416,7 +416,7 @@ showLogprobs(allLogprobs.length - 1);
 
 rewrite_page = st.Page(rewrite_with_predictions, title="Rewrite with predictions", icon="📝")
 highlight_page = st.Page(highlight_edits, title="Highlight locations for possible edits", icon="🖍️")
-generate_page = st.Page(generate_revisions, title="Generate revisions", icon="🔄")
+#generate_page = st.Page(generate_revisions, title="Generate revisions", icon="🔄")
 type_assistant_response_page = st.Page(type_assistant_response, title="Type Assistant Response", icon="🔤")
 show_internals_page = st.Page(show_internals, title="Show Internals", icon="🔧")
 
@@ -425,7 +425,7 @@ page = st.navigation([
     st.Page(landing, title="Home", icon="🏠"),
     highlight_page,
     rewrite_page,
-    generate_page,
+    #generate_page,
     type_assistant_response_page,
     show_internals_page
 ])
