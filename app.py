@@ -366,7 +366,7 @@ def logprobs_component(logprobs):
         if token is not None:
             token_to_show = html.escape(show_token(token, escape_markdown=False))
         else:
-            token_to_show = html.escape("<empty>")
+            token_to_show = html.escape("[____]")
         html_out += f'<span style="border: 1px solid black; display: inline-block;" onclick="showLogprobs({i})" title="Click to show logprobs for this token">{token_to_show}</span>'
     show_logprob_js = '''
 const makeElt = (tag, attrs, children) => {
