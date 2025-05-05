@@ -5,7 +5,10 @@ API_SERVER = "https://tools.kenarnold.org/api"
 
 def landing():
     st.title("Writing Tools Prototypes")
-    st.markdown("Click one of the links below to see a prototype in action.")
+    st.markdown("""
+by [Ken Arnold](https://kenarnold.org) and the [Thoughtful AI Tools Lab](https://thoughtful-ai.com/) at Calvin University, which also publishes the [Thoughtful add-in](https://app.thoughtful-ai.com) for Microsoft Word.
+
+Click one of the links below to see a prototype in action.""")
 
     st.page_link(rewrite_page, label="Rewrite with predictions", icon="📝")
     st.page_link(highlight_page, label="Highlight locations for possible edits", icon="🖍️")
