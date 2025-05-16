@@ -2,6 +2,25 @@ import torch
 from transformers.cache_utils import DynamicCache
 
 
+def catch_and_report_memory_exceptions(func):
+    """
+    Decorator to catch and report memory exceptions.
+    """
+    def wrapper(*args, **kwargs):
+        # https://docs.pytorch.org/docs/stable/torch_cuda_memory.html
+        torch.cuda.memory._record_memory_history()
+        try:
+            return func(*args, **kwargs)
+        except torch.OutOfMemoryError as e:
+            torch.cuda.memory._dump_snapshot("memory_snapshot.pickle")
+            print(f"Memory error: {e}")
+            # clear frames in the traceback to avoid memory leak
+            import traceback, sys
+            traceback.clear_frames(sys.exc_info()[2])
+            raise e
+    return wrapper
+
+
 def get_tokenized_chat(tokenizer, prompt, doc):
     messages = [
         {
@@ -28,6 +47,7 @@ def tokenize_doc_in_progress(tokenizer, doc_in_progress):
     return doc_in_progress_ids
 
 
+@catch_and_report_memory_exceptions
 def get_highlights_inner(model, tokenizer, doc, prompt, updated_doc, k):
     tokenized_chat = get_tokenized_chat(tokenizer, prompt, doc)
     assert len(tokenized_chat.shape) == 1
@@ -63,6 +83,7 @@ def get_highlights_inner(model, tokenizer, doc, prompt, updated_doc, k):
     return highlights
 
 
+@catch_and_report_memory_exceptions
 def get_lookahead_sequences(model, tokenizer, hypotheses, n_branch_tokens, device):
     """
     For each of the n_branch_tokens next tokens, generate most-likely next tokens and append back on.
@@ -113,6 +134,7 @@ def get_lookahead_sequences(model, tokenizer, hypotheses, n_branch_tokens, devic
     return lookahead_sequences, next_token_logits
 
 
+@catch_and_report_memory_exceptions
 def get_next_token_predictions_inner(
         model, tokenizer, original_doc, prompt, doc_in_progress, k):
 
@@ -145,6 +167,7 @@ def get_next_token_predictions_inner(
     return decoded_next_tokens, next_token_logits
 
 
+@catch_and_report_memory_exceptions
 def get_next_token_predictions_slow(
         model, tokenizer, original_doc, prompt, doc_in_progress, k):
 
