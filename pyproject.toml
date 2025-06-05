@@ -3,7 +3,7 @@ name = "writing-prototypes"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11,<3.13" 
+requires-python = ">=3.11,<3.13"
 dependencies = [
     "fastapi>=0.115.8",
     "httpx>=0.28.1",
@@ -12,16 +12,13 @@ dependencies = [
     "pytest>=8.3.4",
     "requests>=2.32.3",
     "streamlit==1.40.1",
-]
-
-[dependency-groups]
-gpu = [
     "accelerate>=1.1.1",
     "torch>=2.5.1",
     "transformers>=4.50.0",
     "tokenizers>=0.21.0",
     "torchao>=0.9.0",
     "setuptools>=77.0.3",
+    "uvicorn>=0.34.3",
 ]
 dev = [
     "ipython>=8.32.0",

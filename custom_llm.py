@@ -1,5 +1,7 @@
-import argparse
 import os
+os.environ["HF_HOME"] = r"D:\huggingface"
+
+import argparse
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -31,7 +33,7 @@ async def models_lifespan(app: FastAPI):
 
     #model_name = 'google/gemma-1.1-7b-it'
     #model_name = 'google/gemma-1.1-2b-it'
-    model_name = 'google/gemma-2-9b-it'
+    model_name = 'google/gemma-3-1b-it'
     #model_name = 'google/gemma-3-12b-it'
     #model_name = 'google/gemma-3-4b-it'
 
@@ -58,22 +60,22 @@ async def models_lifespan(app: FastAPI):
 
     # Print timing info for each endpoint
     print("\nRunning endpoint tests...")
-    
+
     test_doc = "This is a test document that needs to be revised for clarity and conciseness."
     test_prompt = "Make this more clear and concise."
-    
+
     client = TestClient(app)
-    
+
     start = time.time()
-    response = client.get("/api/highlights", 
+    response = client.get("/api/highlights",
         params={"doc": test_doc, "prompt": test_prompt})
     print(f"Highlights endpoint: {time.time() - start:.2f}s")
-    
+
     start = time.time()
     response = client.get("/api/next_token",
         params={"original_doc": test_doc, "prompt": test_prompt, "doc_in_progress": "This is"})
     print(f"Next token endpoint: {time.time() - start:.2f}s")
-    
+
     if False:
         start = time.time()
         response = client.get("/api/gen_revisions",
@@ -106,7 +108,7 @@ app.add_middleware(
 @app.get("/api/highlights")
 def get_highlights(doc: str, prompt: Optional[str] = None, updated_doc: Optional[str] = '', k: Optional[int] = 5):
     ''' Example of using this in JavaScript:
-    
+
     let url = new URL('http://localhost:8000/api/highlights')
     url.searchParams.append('doc', 'This is a test document. It is a test document because it is a test document.')
     url.searchParams.append('prompt', 'Rewrite this document to be more concise.')
@@ -137,7 +139,7 @@ def get_next_token_predictions(original_doc: str,
     tokenizer = ml_models['llm']['tokenizer']
 
     decoded_next_tokens, next_token_logits = get_next_token_predictions_inner(
-        model, tokenizer, original_doc, prompt, doc_in_progress, k) 
+        model, tokenizer, original_doc, prompt, doc_in_progress, k)
 
     return {
         'next_tokens': decoded_next_tokens
@@ -259,7 +261,7 @@ def logprobs(request: ContinueMessagesRequest):
         else:
             actual_token_id = tokenized_chat[0, idx].item()
             token = tokenizer.decode(actual_token_id)
-        
+
         if idx == 0:
             token_logprobs = []
         else:

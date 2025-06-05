@@ -6,6 +6,8 @@ def catch_and_report_memory_exceptions(func):
     """
     Decorator to catch and report memory exceptions.
     """
+    if not torch.cuda.is_available():
+        return func
     def wrapper(*args, **kwargs):
         # https://docs.pytorch.org/docs/stable/torch_cuda_memory.html
         torch.cuda.memory._record_memory_history()
@@ -61,14 +63,14 @@ def get_highlights_inner(model, tokenizer, doc, prompt, updated_doc, k):
     # Compute the next-token logits for the entire document
     with torch.no_grad():
         logits = model(joined_ids[None].to(model.device)).logits[0].cpu()
-    
+
     highlights = []
     length_so_far = 0
     for idx in range(len(tokenized_chat), len(joined_ids)):
         probs = logits[idx - 1].softmax(dim=-1)
         token_id = joined_ids[idx]
         token = tokenizer.decode(token_id)
-        token_loss = -probs[token_id].log().item()
+        token_loss = -(probs[token_id] + 1e-7).log().item()
         topk_tokens = probs.topk(k).indices.cpu().numpy().tolist()
         topk_tokens_decoded = tokenizer.batch_decode(topk_tokens, skip_special_tokens=True)
         highlights.append(dict(
@@ -88,50 +90,64 @@ def get_lookahead_sequences(model, tokenizer, hypotheses, n_branch_tokens, devic
     """
     For each of the n_branch_tokens next tokens, generate most-likely next tokens and append back on.
     """
-    assert len(hypotheses.shape) == 2
-    assert hypotheses.shape[0] == 1
+    assert len(hypotheses.shape) == 2 and hypotheses.shape[0] == 1, "Expected input shape (1, sequence_length)"
     n_tokens_so_far = hypotheses.shape[1]
+    hypotheses = hypotheses.to(device)
     past_key_values = DynamicCache()
 
     with torch.no_grad():
-        model_outs_onestep = model(hypotheses, output_hidden_states=True, past_key_values=past_key_values)
+        outputs = model(hypotheses, output_hidden_states=True, past_key_values=past_key_values)
 
-    branch_tokens = model_outs_onestep.logits[0, -1].topk(n_branch_tokens).indices
+    # Get top-k tokens from last token position
+    branch_tokens = outputs.logits[0, -1].topk(n_branch_tokens).indices.to(device)
 
-    # split the cache into n_branch_tokens reps. We pretend we're doing a "Beam search"...
+    # Duplicate the cache for each branch. We pretend we're doing a "Beam search"...
     past_key_values.reorder_cache(torch.zeros((n_branch_tokens,), dtype=torch.long, device=device))
 
     # Now call the model again, passing the kv cache, so we can continue generating.
     # Each of the n_branch_tokens next tokens will be considered as one sequence in a "batch".
-    next_tokens_as_batch = branch_tokens.unsqueeze(1)
-    assert next_tokens_as_batch.shape == (n_branch_tokens, 1)
+    sequences = branch_tokens.unsqueeze(1)
+    assert sequences.shape == (n_branch_tokens, 1)
 
     position_id_for_final_token = n_tokens_so_far
-    cache_position = torch.full((1,), position_id_for_final_token, dtype=int, device=device)
-    with torch.no_grad():
-        model_outs = model(
-            next_tokens_as_batch,
-            past_key_values=past_key_values,
-            output_hidden_states=True,
-            use_cache=True,
-            # the cache surprisingly doesn't know the position of the last token
-            cache_position=cache_position
-        )
-    
-    # Grab the single most likely token from each of the n_branch_tokens sequences
-    next_token_logits = model_outs.logits[:, -1]
-    vocab_size = model.config.vocab_size
-    assert next_token_logits.shape == (n_branch_tokens, vocab_size), f"{next_token_logits.shape=}, {n_branch_tokens=}, {vocab_size=}"
-    most_likely_token_ids = next_token_logits.argmax(dim=-1)
 
-    # Stick them at the end of the branch tokens.
-    assert most_likely_token_ids.shape == (n_branch_tokens,)
-    lookahead_sequences = torch.cat([
-        branch_tokens.unsqueeze(1),
-        most_likely_token_ids.unsqueeze(1)
-    ], dim=1)
-    assert lookahead_sequences.shape == (n_branch_tokens, 2)
-    return lookahead_sequences, next_token_logits
+    for _ in range(2):  # Generate 2 more tokens
+        cache_position_tensor = torch.tensor([position_id_for_final_token], device=device)  # Convert to tensor
+        attention_mask = torch.ones((n_branch_tokens, 1), dtype=torch.long, device=device)
+
+        try:
+            with torch.no_grad():
+                current_input = sequences[:, -1:]
+                assert current_input.shape == (n_branch_tokens, 1)
+
+                model_outs = model(
+                    current_input,
+                    past_key_values=past_key_values,
+                    output_hidden_states=True,
+                    use_cache=True,
+                    cache_position=cache_position_tensor,
+                    attention_mask=attention_mask
+                )
+        except Exception as e:
+            print("Error during model forward pass:", e)
+            raise
+
+        # Grab the single most likely token from each of the n_branch_tokens sequences
+        next_token_logits = model_outs.logits[:, -1]
+        vocab_size = model.config.vocab_size
+        assert next_token_logits.shape == (n_branch_tokens, vocab_size), f"{next_token_logits.shape=}, {n_branch_tokens=}, {vocab_size=}"
+        most_likely_token_ids = next_token_logits.argmax(dim=-1)
+        assert most_likely_token_ids.shape == (n_branch_tokens,)
+
+        sequences = torch.cat([
+            sequences,
+            most_likely_token_ids.unsqueeze(1)
+        ], dim=1)
+
+        position_id_for_final_token += 1
+
+    return sequences, next_token_logits
+
 
 
 @catch_and_report_memory_exceptions
@@ -198,7 +214,7 @@ def get_next_token_predictions_slow(
 
     with torch.no_grad():
         model_outs = model(hypotheses_with_next_tokens)
-    
+
     # Grab the single most likely token from each of the k sequences
     next_token_logits = model_outs.logits[:, -1]
     vocab_size = model.config.vocab_size

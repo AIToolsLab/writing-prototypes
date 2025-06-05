@@ -85,7 +85,7 @@ def rewrite_with_predictions():
         st.session_state['rewrite_in_progress'] = (
             rewrite_in_progress + word
         )
-    
+
     allow_multi_word = st.checkbox("Allow multi-word predictions", value=False)
 
     for i, (col, token) in enumerate(zip(st.columns(len(tokens)), tokens)):
@@ -94,7 +94,7 @@ def rewrite_with_predictions():
                 token = token[0] + token[1:].split(' ', 1)[0]
             token_display = show_token(token)
             st.button(token_display, on_click=append_token, args=(token,), key=i, use_container_width=True)
-    
+
 
 @st.cache_data
 def get_highlights(prompt, doc, updated_doc):
@@ -130,9 +130,9 @@ def highlight_edits():
     if num_different == 0:
         st.write("No possible edits found.")
         st.stop()
-    
+
     output_container = st.container(border=True)
-    
+
     with st.expander("Controls"):
         num_to_show = st.slider("Number of edits to show", 1, num_different, value=num_different // 2)
         show_alternatives = st.checkbox("Show alternatives", value=True)
@@ -189,13 +189,13 @@ def highlights_component(spans, show_alternatives, min_loss, show_all_on_hover=F
         }}
         p.highlights-container > span:hover .alternative {{
             display: inline;
-            position: absolute; 
-            top: -24px; 
+            position: absolute;
+            top: -24px;
             left: 50%;
             transform: translateX(-50%);
-            min-width: 6em; 
+            min-width: 6em;
             text-align: center;
-            line-height: 1.2; 
+            line-height: 1.2;
             color: #1976D2;  /* Clear blue */
             background: white;
             padding: 4px 8px;
@@ -207,7 +207,7 @@ def highlights_component(spans, show_alternatives, min_loss, show_all_on_hover=F
     <p class="highlights-container">{html_out}</p>
     """
     return st.html(html_out)
-    
+
 
 def get_revised_docs(prompt, doc, n):
     response = requests.get("https://tools.kenarnold.org/api/gen_revisions", params=dict(prompt=prompt, doc=doc, n=n))
@@ -258,7 +258,7 @@ def type_assistant_response():
             messages[-1]['content'] = st.session_state['msg_in_progress'] = (
                 msg_in_progress + word
             )
-        
+
         allow_multi_word = st.checkbox("Allow multi-word predictions", value=False)
 
         response = requests.post(
@@ -293,13 +293,13 @@ def type_assistant_response():
                 #         token = before_ws
                 token_display = show_token(token)
                 st.button(token_display, on_click=append_token, args=(token,), key=i, use_container_width=True)
-        
+
         def send_message():
             other_role = "assistant" if last_role == "user" else "user"
             st.session_state['messages'].append({"role": other_role, "content": ""})
             st.session_state['msg_in_progress'] = ""
         st.button("Send", on_click=send_message)
-        
+
 def show_internals():
     if 'messages' not in st.session_state or st.button("Start a new conversation"):
         st.session_state['messages'] = [{"role": "user", "content": ""}]
@@ -329,7 +329,7 @@ def show_internals():
             messages[-1]['content'] = st.session_state['msg_in_progress'] = (
                 msg_in_progress + word
             )
-        
+
         def send_message():
             other_role = "assistant" if last_role == "user" else "user"
             st.session_state['messages'].append({"role": other_role, "content": ""})
@@ -354,8 +354,8 @@ def show_internals():
         logprobs = response['logprobs']
         st.write("Conversation so far as tokens (click to show logprobs):")
         logprobs_component(logprobs)
-        
-        
+
+
 def logprobs_component(logprobs):
     # logprobs is a list of tokens:
     # {
@@ -410,7 +410,7 @@ const makeElt = (tag, attrs, children) => {
     <p class="logprobs-container">{html_out}</p>
     <div id="logprobs-display"></div>
     <script>allLogprobs = {json.dumps(logprobs)};
-    
+
     {show_logprob_js}
 
 //showLogprobs(allLogprobs.length - 1);
