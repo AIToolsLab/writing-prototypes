@@ -90,7 +90,6 @@ def get_lookahead_sequences(model, tokenizer, hypotheses, n_branch_tokens, devic
     """
     For each of the n_branch_tokens next tokens, generate most-likely next tokens and append back on.
     """
-    assert len(hypotheses.shape) == 2 and hypotheses.shape[0] == 1, "Expected input shape (1, sequence_length)"
     n_tokens_so_far = hypotheses.shape[1]
     hypotheses = hypotheses.to(device)
     past_key_values = DynamicCache()
@@ -134,8 +133,6 @@ def get_lookahead_sequences(model, tokenizer, hypotheses, n_branch_tokens, devic
 
         # Grab the single most likely token from each of the n_branch_tokens sequences
         next_token_logits = model_outs.logits[:, -1]
-        vocab_size = model.config.vocab_size
-        assert next_token_logits.shape == (n_branch_tokens, vocab_size), f"{next_token_logits.shape=}, {n_branch_tokens=}, {vocab_size=}"
         most_likely_token_ids = next_token_logits.argmax(dim=-1)
         assert most_likely_token_ids.shape == (n_branch_tokens,)
 

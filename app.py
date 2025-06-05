@@ -1,7 +1,7 @@
 import streamlit as st
 import requests
 
-API_SERVER = "https://tools.kenarnold.org/api"
+API_SERVER = "http://localhost:19578/api"
 
 def landing():
     st.title("Writing Tools Prototypes")

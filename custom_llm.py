@@ -1,5 +1,5 @@
 import os
-os.environ["HF_HOME"] = r"D:\huggingface"
+# os.environ["HF_HOME"] = r"D:\huggingface"
 
 import argparse
 import time
@@ -36,6 +36,7 @@ async def models_lifespan(app: FastAPI):
     model_name = 'google/gemma-3-1b-it'
     #model_name = 'google/gemma-3-12b-it'
     #model_name = 'google/gemma-3-4b-it'
+
 
     if USE_GPU:
         dtype = torch.bfloat16
@@ -88,7 +89,7 @@ async def models_lifespan(app: FastAPI):
     ml_models.clear()
 
 DEBUG = os.getenv("DEBUG") or False
-PORT = int(os.getenv("PORT") or "19570")
+PORT = int(os.getenv("PORT") or "19578")
 
 app = FastAPI(lifespan=models_lifespan)
 
