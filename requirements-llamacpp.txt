@@ -1,0 +1,15 @@
+# llama.cpp backend requirements
+-r requirements-base.txt
+
+# llama-cpp-python with CUDA support
+# For CPU-only, remove the CMAKE flags or install the pre-built wheels
+llama-cpp-python>=0.2.0
+
+# Installation with CUDA support:
+# CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+
+# Or use pre-built wheels (CPU only):
+# pip install llama-cpp-python
+
+# Note: Requires a GGUF model file, not a HuggingFace model
+# You can convert HuggingFace models to GGUF using llama.cpp conversion scripts

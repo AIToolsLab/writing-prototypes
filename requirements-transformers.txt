@@ -1,0 +1,11 @@
+# Original HuggingFace Transformers backend requirements
+-r requirements-base.txt
+
+# PyTorch and transformers
+torch>=2.5.0
+transformers>=4.50.0
+accelerate>=0.34.0
+sentencepiece>=0.2.0
+
+# Optional: for quantization
+# bitsandbytes>=0.44.0

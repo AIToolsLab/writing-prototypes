@@ -1,0 +1,8 @@
+# Base requirements for the writing prototypes project
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+streamlit>=1.40.0
+requests>=2.32.0
+numpy>=1.26.0
+pandas
+tabulate  # For comparison script

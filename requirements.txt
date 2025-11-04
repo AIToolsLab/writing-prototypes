@@ -1,4 +1,21 @@
-#torch
-pandas
-#transformers[sentencepiece]
-#accelerate
+# Base requirements
+# For specific backends, use:
+# - requirements-vllm.txt (vLLM backend - recommended)
+# - requirements-llamacpp.txt (llama.cpp backend)
+# - requirements-transformers.txt (original HuggingFace backend)
+
+-r requirements-base.txt
+
+# Uncomment for the backend you want to use:
+
+# vLLM (recommended for production)
+# vllm>=0.6.0
+
+# llama.cpp (for GGUF models)
+# llama-cpp-python>=0.2.0
+
+# HuggingFace Transformers (original implementation)
+# torch>=2.5.0
+# transformers>=4.50.0
+# accelerate>=0.34.0
+# sentencepiece>=0.2.0

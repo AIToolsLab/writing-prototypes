@@ -1,0 +1,10 @@
+# vLLM backend requirements
+-r requirements-base.txt
+
+# vLLM with dependencies
+vllm>=0.6.0
+
+# Note: vLLM requires:
+# - CUDA 11.8 or higher
+# - Python 3.9-3.12
+# - PyTorch 2.0 or higher (installed automatically with vLLM)
