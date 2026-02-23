@@ -2,3 +2,7 @@
 *.pyo
 .DS_store
 .venv
+
+node_modules
+dist
+frontend/.env
