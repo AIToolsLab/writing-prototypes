@@ -1,3 +1,6 @@
+# References for vLLM:
+# https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/completion/protocol.py
+
 import streamlit as st
 import requests
 import json
@@ -45,6 +48,8 @@ def show_internals():
 
         messages[-1]['content'] = msg_in_progress + st.session_state.placeholder_token
 
+        st.write(messages)
+
         def send_message():
             other_role = "assistant" if last_role == "user" else "user"
             st.session_state['messages'].append({"role": other_role, "content": ""})
@@ -67,7 +72,7 @@ def show_internals():
         token_strs = token_ids_req['token_strs']
 
         # completion given prompt token ids
-        tmp = requests.post(
+        logprobs_request = requests.post(
             "https://vllm.thoughtful-ai.com/v1/completions",
             headers={"Content-Type": "application/json"},
             json={
@@ -79,52 +84,26 @@ def show_internals():
                 "top_logprobs": 5,
             }
         )
-        st.write(tmp.json()['choices'][0]['logprobs'])
-
-
-
-
-
-        # Make request to vLLM.
-        st.write(messages)
-        result = requests.post(
-            "https://vllm.thoughtful-ai.com/v1/chat/completions",
-            headers={"Content-Type": "application/json"},
-            json={
-                "model": "Qwen/Qwen3.5-9B",
-                "messages": messages,
-                "max_tokens": 2,
-                "logprobs": True,
-                "continue_final_message": True,
-                "add_generation_prompt": False,
-                "top_logprobs": 5,
-                "prompt_logprobs": 5,
-                "top_k": 20,
-                "chat_template_kwargs": {"enable_thinking": False},
-                "echo": True
-            }
-        )
-        result = result.json()
-        prompt_logprobs = result['prompt_logprobs']
+        logprobs_request = logprobs_request.json()
+        complete_text = logprobs_request['choices'][0]['text']
+        logprobs_part = logprobs_request['choices'][0]['logprobs']
         logprobs = []
-        for tok in prompt_logprobs[1:]: # first token has no logprobs
-            # looks like
-            tok_logprobs = {v['decoded_token']: v['logprob'] for v in tok.values()}
+        for i in range(len(token_ids)):
+            if i == 0:
+                # first token has no logprobs, but show the token string.
+                logprobs.append({
+                    "token": logprobs_part['tokens'][0],
+                    "logprobs": None
+                })
+                continue
+
+            top_logprobs = logprobs_part['top_logprobs'][i]
             logprobs.append({
-                "token": next(iter(tok_logprobs.keys())),
-                "logprobs": tok_logprobs
+                "token": logprobs_part['tokens'][i],
+                "logprobs": {tok: logprob for tok, logprob in top_logprobs.items()}
             })
+        #st.write(logprobs_part)
 
-        # # Add the last token (set "token" to None)
-        # last_token_logprobs = result['choices'][0]['logprobs']['content'][0]['top_logprobs']
-        # logprobs.append(
-        #     {
-        #         "token": None,
-        #         "logprobs": {tok["token"]: tok["logprob"] for tok in last_token_logprobs}
-        #     }
-        # )
-
-        # The last token was actually the placeholder token, so it serves as the "next token" whose logprobs we want to show. We can just replace it with None for display purposes.
         if logprobs and logprobs[-1]['token'] == st.session_state.placeholder_token:
             logprobs[-1]['token'] = None
             # remove the placeholder token logprobs, since they aren't meaningful
