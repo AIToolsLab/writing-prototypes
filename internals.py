@@ -2,6 +2,8 @@ import streamlit as st
 import requests
 import json
 
+placeholders_to_try = '#.?!@$%^&*()_+-=~`|;:"<>,./\\'
+
 def show_token(token: str, escape_markdown=True) -> str:
     token_display = token.replace('\n', '↵').replace('\t', '⇥')
     if escape_markdown:
@@ -14,6 +16,7 @@ def show_internals():
     if 'messages' not in st.session_state or st.button("Start a new conversation"):
         st.session_state['messages'] = [{"role": "user", "content": ""}]
         st.session_state['msg_in_progress'] = ""
+        st.session_state['placeholder_token'] = placeholders_to_try[0]
     messages = st.session_state.messages
 
     def rewind_to(i):
@@ -33,18 +36,54 @@ def show_internals():
         if msg_in_progress is None:
             msg_in_progress = ""
 
-        messages[-1]['content'] = msg_in_progress
+        # Unfortunately chat templates include things like this:
+        #     {%- set content = render_content(message.content, true)|trim %}
+        # so we can't include leading or trailing whitespace.
+        # Can't do much about leading whitespace, but we can at least allow trailing whitespace by including a special token for it.
+        # Unfortunately there's no single token that never gets joined with any other one, so we have to try a few different ones and see which one actually gets separated out by the tokenizer.
 
-        def append_token(word):
-            messages[-1]['content'] = st.session_state['msg_in_progress'] = (
-                msg_in_progress + word
-            )
-        
+
+        messages[-1]['content'] = msg_in_progress + st.session_state.placeholder_token
+
         def send_message():
             other_role = "assistant" if last_role == "user" else "user"
             st.session_state['messages'].append({"role": other_role, "content": ""})
             st.session_state['msg_in_progress'] = ""
         st.button("Send", on_click=send_message)
+
+        token_ids_req = requests.post(
+            "https://vllm.thoughtful-ai.com/tokenize",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "Qwen/Qwen3.5-9B",
+                "messages": messages,
+                "continue_final_message": True,
+                "add_generation_prompt": False,
+                "return_token_strs": True,
+            }
+        )
+        token_ids_req = token_ids_req.json()
+        token_ids = token_ids_req['tokens']
+        token_strs = token_ids_req['token_strs']
+
+        # completion given prompt token ids
+        tmp = requests.post(
+            "https://vllm.thoughtful-ai.com/v1/completions",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "Qwen/Qwen3.5-9B",
+                "prompt": token_ids,
+                "max_tokens": 2,
+                "logprobs": 5,
+                "echo": True,
+                "top_logprobs": 5,
+            }
+        )
+        st.write(tmp.json()['choices'][0]['logprobs'])
+
+
+
+
 
         # Make request to vLLM.
         st.write(messages)
@@ -76,15 +115,27 @@ def show_internals():
                 "logprobs": tok_logprobs
             })
 
-        # Add the last token (set "token" to None)
-        last_token_logprobs = result['choices'][0]['logprobs']['content'][0]['top_logprobs']
-        logprobs.append(
-            {
-                "token": None,
-                "logprobs": {tok["token"]: tok["logprob"] for tok in last_token_logprobs}
-            }
-        )
+        # # Add the last token (set "token" to None)
+        # last_token_logprobs = result['choices'][0]['logprobs']['content'][0]['top_logprobs']
+        # logprobs.append(
+        #     {
+        #         "token": None,
+        #         "logprobs": {tok["token"]: tok["logprob"] for tok in last_token_logprobs}
+        #     }
+        # )
 
+        # The last token was actually the placeholder token, so it serves as the "next token" whose logprobs we want to show. We can just replace it with None for display purposes.
+        if logprobs and logprobs[-1]['token'] == st.session_state.placeholder_token:
+            logprobs[-1]['token'] = None
+            # remove the placeholder token logprobs, since they aren't meaningful
+            logprobs[-1]['logprobs'] = {tok: logprob for tok, logprob in logprobs[-1]['logprobs'].items() if tok != st.session_state.placeholder_token}
+        else:
+            st.warning("Expected the last token to be the placeholder token, but it wasn't. Logprobs may not display correctly.")
+            if st.button("Try a different placeholder token"):
+                current_index = placeholders_to_try.index(st.session_state.placeholder_token)
+                next_index = (current_index + 1) % len(placeholders_to_try)
+                st.session_state.placeholder_token = placeholders_to_try[next_index]
+                st.rerun()
 
         #st.write(last_token_logprobs)
         st.write("Conversation so far as tokens (click to show logprobs):")
@@ -151,7 +202,7 @@ function escapeToken(token) {
     
     {show_logprob_js}
 
-//showLogprobs(allLogprobs.length - 1);
+showLogprobs(allLogprobs.length - 1);
 </script>
 """
     import streamlit.components.v1 as components
