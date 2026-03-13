@@ -81,7 +81,6 @@ def show_internals():
                 "max_tokens": 2,
                 "logprobs": 5,
                 "echo": True,
-                "top_logprobs": 5,
             }
         )
         logprobs_request = logprobs_request.json()
