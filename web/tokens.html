@@ -11,6 +11,7 @@
 <h1>Token-level writing tools</h1>
 <p class="hint">Uses raw next-token log-probabilities: the conversation is “instruction + document → assistant response”, and we read the model's distribution at each position of the response.</p>
 <div id="status"></div>
+<div id="warning"></div>
 
 <label for="instruction">Instruction</label>
 <input type="text" id="instruction" list="instruction-presets" value="Rewrite this document to be clear and concise.">
@@ -126,35 +127,94 @@ async function fetchSuggestions(signal) {
   const t0 = performance.now();
   const prefix = await chatPrefix(taskMessages($("instruction").value, $("doc").value));
   const prompt = prefix.text + base;
-  const res = await completions({prompt, max_tokens: 1, logprobs: 20, temperature: 0, ...(typed && startsWith(typed))}, signal);
 
-  // Each candidate first token fixes what the output starts with: the token itself if it
-  // covers what was typed, else just the typed text (the model will spell out the rest).
-  // Probabilities are already conditioned on the constraint (the server renormalizes them).
-  const branches = new Map();  // forced start -> total probability
-  for (const [tok, logprob] of Object.entries(res.choices[0].logprobs.top_logprobs[0])) {
-    if (/^<\|.*\|>$/.test(tok) || !(tok.startsWith(typed) || typed.startsWith(tok))) continue;
-    const forced = tok.length >= typed.length ? tok : typed;
-    branches.set(forced, (branches.get(forced) ?? 0) + Math.exp(logprob));
+  // Request 1: a short greedy path ("spine") from the boundary, with the top alternatives at
+  // each step. Each alternative starts a branch, scored by its whole path's probability. Looking
+  // past the first step matters when the typed text fixes the first token (e.g. typed " learning"):
+  // the choices then come from the step after. Enough steps to cover the typed text, plus a few.
+  // The draft's tokens are only for checking our pre-tokenizer split; /tokenize uses no GPU time.
+  const [spineRes, draftTokens] = await Promise.all([completions({
+    prompt,
+    max_tokens: 3 + Math.ceil(typed.length / 4),
+    logprobs: 20,
+    temperature: 0,
+    return_token_ids: true,
+    ...(typed && startsWith(typed)),
+  }, signal), post("/tokenize", {model: MODEL, prompt: prefix.text + draft, add_special_tokens: false}, signal)]);
+  const spine = spineRes.choices[0];
+  checkBoundary(spine.prompt_token_ids, draftTokens.tokens, base);
+  const {tokens, token_logprobs, top_logprobs} = spine.logprobs;
+  let branches = [];
+  let pathText = "", pathLogprob = 0;
+  for (let j = 0; j < tokens.length; j++) {
+    for (const [tok, logprob] of Object.entries(top_logprobs[j])) {
+      const forced = pathText + tok;
+      // Only branches that get past the typed text to something visible are suggestions.
+      if (/^<\|.*\|>$/.test(tok) || !forced.startsWith(typed) || !forced.slice(typed.length).trim()) continue;
+      branches.push({forced, prob: Math.exp(pathLogprob + logprob)});
+    }
+    pathText += tokens[j];
+    pathLogprob += token_logprobs[j];
   }
-  const top = [...branches].sort((a, b) => b[1] - a[1]).slice(0, NUM_SUGGESTIONS);
+  branches.sort((a, b) => b.prob - a.prob);
 
-  // Show the first tokens right away; the lookahead below refines them.
-  renderSuggestions(draft, top.map(([forced, prob]) => ({text: forced.slice(typed.length), prob})).filter(s => s.text));
-  if (top.length === 0) return;
-
-  // Most tokens are whole words, but some are word pieces; extend each branch greedily so we
-  // can cut it at a word boundary. Each branch restarts from the boundary with its own
-  // constraint (appending a partial token to the prompt would reintroduce the problem above),
-  // so they're separate requests, sent in parallel.
+  // Branches that already contain the words we'll show are final; keep the most probable one per
+  // shown text (e.g. " deep learning" and " deep neural" both show as "ep" after typed " de").
+  // The rest end mid-word and may still grow into something distinct.
   const wordsWanted = +$("words-per-suggestion").value;
-  const suggestions = await Promise.all(top.map(async ([forced, prob]) => {
-    const cont = await completions({prompt, max_tokens: 2 * wordsWanted + 4, temperature: 0, ...startsWith(forced)}, signal);
-    return {text: firstWords(cont.choices[0].text.slice(typed.length), wordsWanted), prob};
-  }));
-  const unique = suggestions.filter((s, i) => s.text && suggestions.findIndex(t => t.text === s.text) === i);
+  const shown = new Set();
+  branches = branches.filter(b => {
+    b.final = completeWords(b.forced.slice(typed.length), wordsWanted);
+    if (b.final === null) return true;
+    if (shown.has(b.final)) return false;
+    shown.add(b.final);
+    return true;
+  }).slice(0, NUM_SUGGESTIONS + 2);  // a little extra, since extended branches may turn out to be duplicates
+  const toSuggestions = () => uniqueSuggestions(branches.map(b => ({
+    text: b.final ?? firstWords(b.forced.slice(typed.length), wordsWanted),
+    prob: b.prob,
+  })));
+  // Show the branches right away; the lookahead below finishes their words.
+  renderSuggestions(draft, toSuggestions());
+
+  // Request 2 (if needed): extend the unfinished branches greedily, in one batch, so we can cut
+  // them at a word boundary. Each branch already contains the typed text, so no constraint.
+  // (On our server, decoding gets slower per step as the batch grows, so extend as few as we can.)
+  const unfinished = branches.filter(b => b.final === null);
+  if (unfinished.length > 0) {
+    const extRes = await completions({
+      prompt: unfinished.map(b => prompt + b.forced),
+      max_tokens: 2 * wordsWanted,
+      temperature: 0,
+    }, signal);
+    for (const choice of extRes.choices) {
+      const b = unfinished[choice.index];
+      b.final = firstWords((b.forced + choice.text).slice(typed.length), wordsWanted);
+    }
+  }
   setStatus(`Predicted in ${Math.round(performance.now() - t0)} ms`);
-  renderSuggestions(draft, unique);
+  renderSuggestions(draft, toSuggestions());
+}
+
+// If our pre-tokenizer split matches the server's, the tokens of `base` are a prefix of the
+// tokens of the whole draft. Warn if not.
+function checkBoundary(baseIds, draftIds, base) {
+  const matches = baseIds.every((id, i) => id === draftIds[i]);
+  $("warning").textContent = matches ? "" :
+    `Tokenization warning: the draft's tokens don't start with the tokens of ${JSON.stringify(base.slice(-20))}, ` +
+    `so this page's pre-tokenizer split doesn't match the server's. Mid-word predictions may be off.`;
+}
+
+// The first n words of text, if text already contains them followed by whitespace; else null.
+function completeWords(text, n) {
+  const match = text.match(new RegExp(`^\\s*\\S+(?:[ \\t]+\\S+){${n - 1}}(?=\\s)`));
+  return match ? match[0] : null;
+}
+
+function uniqueSuggestions(suggestions) {
+  return suggestions
+    .filter((s, i) => s.text.trim() && suggestions.findIndex(t => t.text === s.text) === i)
+    .slice(0, NUM_SUGGESTIONS);
 }
 
 // Leading whitespace plus the first n whitespace-delimited words.
@@ -166,18 +226,22 @@ function firstWords(text, n) {
 function renderSuggestions(draft, suggestions) {
   const container = $("suggestions");
   container.innerHTML = "";
-  for (const {text, prob} of suggestions) {
+  for (let i = 0; i < NUM_SUGGESTIONS; i++) {
     const btn = document.createElement("button");
-    btn.textContent = showToken(text);
+    container.appendChild(btn);
+    if (!suggestions[i]) { btn.disabled = true; continue; }
+    const {text, prob} = suggestions[i];
+    const label = document.createElement("span");
+    label.textContent = showToken(text);
     const small = document.createElement("small");
     small.textContent = `${Math.round(prob * 100)}%`;
-    btn.appendChild(small);
+    btn.append(label, small);
+    btn.title = text;
     btn.addEventListener("click", () => {
       $("draft").value = draft + text;
       $("draft").focus();
       updateSuggestions();
     });
-    container.appendChild(btn);
   }
 }
 

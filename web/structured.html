@@ -116,6 +116,8 @@ function renderEdits(doc, edits) {
 
 // ── Predictions ────────────────────────────────────────────────────────────
 
+const NUM_SUGGESTIONS = 5;
+
 const SUGGEST_SYSTEM = `You help a person write a response to a task. Given the task, the document, and the person's draft so far, suggest 5 different short phrases (1 to 4 words each) that could come next, continuing directly from the end of the draft. Order them from most to least likely. Give only the continuation text, not the draft.`;
 
 const SUGGEST_SCHEMA = {
@@ -134,7 +136,7 @@ async function fetchSuggestions(signal) {
     {role: "user", content: `Task: ${$("instruction").value}\n\nDocument:\n${$("doc").value}\n\nDraft so far:\n${draft}`},
   ], SUGGEST_SCHEMA, {maxTokens: 100, signal});
   setStatus(`Suggested in ${Math.round(performance.now() - t0)} ms (${usage.completion_tokens} tokens generated)`);
-  renderSuggestions(draft, result.suggestions.slice(0, 5));
+  renderSuggestions(draft, result.suggestions.slice(0, NUM_SUGGESTIONS));
 }
 
 // The model gives bare phrases, so we decide the spacing: add a space unless the draft
@@ -148,15 +150,20 @@ function joinPhrase(draft, phrase) {
 function renderSuggestions(draft, suggestions) {
   const container = $("suggestions");
   container.innerHTML = "";
-  for (const phrase of suggestions) {
+  for (let i = 0; i < NUM_SUGGESTIONS; i++) {
     const btn = document.createElement("button");
-    btn.textContent = showToken(phrase);
+    container.appendChild(btn);
+    const phrase = suggestions[i];
+    if (!phrase) { btn.disabled = true; continue; }
+    const label = document.createElement("span");
+    label.textContent = showToken(phrase);
+    btn.append(label);
+    btn.title = phrase;
     btn.addEventListener("click", () => {
       $("draft").value = joinPhrase(draft, phrase);
       $("draft").focus();
       updateSuggestions();
     });
-    container.appendChild(btn);
   }
 }
 

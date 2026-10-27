@@ -47,7 +47,20 @@ textarea { min-height: 7rem; }
 #highlighted .hl:hover .alt { display: block; }
 #highlighted.show-alts .hl .alt { display: inline; position: static; border: none; box-shadow: none; padding: 0 0 0 2px; background: none; }
 
-/* Suggestions */
-#suggestions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.4rem; min-height: 2rem; }
-#suggestions button { font: inherit; padding: 0.25rem 0.6rem; cursor: pointer; white-space: pre; }
-#suggestions button small { color: #888; margin-left: 0.3rem; }
+#warning { font-size: 0.85rem; color: #b00020; }
+
+/* Suggestions: a fixed number of fixed-width slots, so they don't jump around as they update */
+#suggestions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.4rem; }
+#suggestions button {
+  font: inherit;
+  width: 10rem;
+  height: 2rem;
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+#suggestions button:disabled { cursor: default; }
+#suggestions button span { flex: 1; text-align: left; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+#suggestions button small { color: #888; flex-shrink: 0; }
