@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Writing Tools Prototypes</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>Writing Tools Prototypes</h1>
+<p>by <a href="https://kenarnold.org">Ken Arnold</a> and the <a href="https://thoughtful-ai.com/">Thoughtful AI Tools Lab</a> at Calvin University.</p>
+<p>Two ways to do the same two things (highlight where the AI would write differently; predict what you might type next), both against a stock vLLM server:</p>
+<ul>
+  <li><a href="tokens.html">Token-level</a>: reads the model's next-token log-probabilities directly.</li>
+  <li><a href="structured.html">Structured</a>: asks the model, via chat, to describe edits and suggestions as JSON.</li>
+</ul>
+<p class="hint">Add <code>?server=https://your-vllm-host</code> to use a different server. These pages send your text to that server, which may log requests; don't use sensitive information.</p>
+</body>
+</html>

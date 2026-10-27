@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Structured Writing Tools</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav><a href="index.html">Home</a> · <a href="tokens.html">Token-level</a> · Structured</nav>
+<h1>Structured writing tools</h1>
+<p class="hint">Uses ordinary chat completions: we ask the model to <em>describe</em> its edits or suggestions as JSON (schema-constrained). Prompts put stable content first and the changing draft last so vLLM's prefix cache can reuse work.</p>
+<div id="status"></div>
+
+<label for="instruction">Instruction</label>
+<input type="text" id="instruction" list="instruction-presets" value="Rewrite this document to be clear and concise.">
+<datalist id="instruction-presets">
+  <option value="Rewrite this document to be clear and concise.">
+  <option value="Rewrite this document to be more formal and professional.">
+  <option value="Rewrite this document to be more casual and conversational.">
+  <option value="Summarize this document in one sentence.">
+  <option value="Write a concise essay according to this outline.">
+</datalist>
+
+<label for="doc">Document</label>
+<textarea id="doc">Deep learning neural network technology advances are pretty cool if you are careful to use it in ways that don't take stuff from people.</textarea>
+
+<h2>Where the AI would write differently</h2>
+<p class="hint">Asks the model to list edits as exact quotes plus replacements, then finds each quote in the document. Hover for the replacement and reason.
+  <span><input type="checkbox" id="show-alts"> show replacements inline</span></p>
+<div id="highlighted"></div>
+
+<h2>Write the response with predictions</h2>
+<p class="hint">Asks the model for a few possible next phrases given the draft. Click one to append it.</p>
+<label for="draft">Response draft</label>
+<textarea id="draft" placeholder="Start typing, or click a suggestion below."></textarea>
+<div id="suggestions"></div>
+
+<script src="llm.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+
+// ── Edits ──────────────────────────────────────────────────────────────────
+
+const EDITS_SYSTEM = `You are a careful editor. The user gives an instruction and a document. Do not rewrite the whole document. Instead, list the specific edits you would make to carry out the instruction, as several small, separate edits rather than one large one. For each edit, "original" must be copied exactly from the document (a short span, a few words), "replacement" is what you would write instead, and "reason" is a few words.`;
+
+const EDITS_SCHEMA = {
+  type: "object",
+  properties: {
+    edits: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          original: {type: "string"},
+          replacement: {type: "string"},
+          reason: {type: "string"},
+        },
+        required: ["original", "replacement", "reason"],
+      },
+    },
+  },
+  required: ["edits"],
+};
+
+async function fetchEdits(signal) {
+  const doc = $("doc").value;
+  if (!doc.trim()) { renderEdits(doc, []); return; }
+  setStatus("Asking for edits…");
+  const t0 = performance.now();
+  const {result, usage} = await chatJSON([
+    {role: "system", content: EDITS_SYSTEM},
+    {role: "user", content: `Instruction: ${$("instruction").value}\n\nDocument:\n${doc}`},
+  ], EDITS_SCHEMA, {signal});
+  const placed = locateEdits(doc, result.edits);
+  const missing = result.edits.length - placed.length;
+  setStatus(`${placed.length} edits in ${Math.round(performance.now() - t0)} ms (${usage.completion_tokens} tokens generated)` +
+    (missing ? `; ${missing} quote(s) not found in the document` : ""));
+  renderEdits(doc, placed);
+}
+
+// Find each edit's quote in the document; drop ones that don't match or overlap an earlier one.
+function locateEdits(doc, edits) {
+  const placed = [];
+  for (const edit of edits) {
+    if (!edit.original) continue;
+    let start = doc.indexOf(edit.original);
+    while (start !== -1 && placed.some(p => start < p.end && p.start < start + edit.original.length)) {
+      start = doc.indexOf(edit.original, start + 1);
+    }
+    if (start === -1) continue;
+    placed.push({...edit, start, end: start + edit.original.length});
+  }
+  return placed.sort((a, b) => a.start - b.start);
+}
+
+function renderEdits(doc, edits) {
+  const container = $("highlighted");
+  container.innerHTML = "";
+  let pos = 0;
+  for (const edit of edits) {
+    container.append(doc.slice(pos, edit.start));
+    const el = document.createElement("span");
+    el.className = "hl";
+    el.textContent = edit.original;
+    el.title = edit.reason;
+    const alt = document.createElement("span");
+    alt.className = "alt";
+    alt.textContent = `→ ${edit.replacement}`;
+    el.appendChild(alt);
+    container.appendChild(el);
+    pos = edit.end;
+  }
+  container.append(doc.slice(pos));
+}
+
+// ── Predictions ────────────────────────────────────────────────────────────
+
+const SUGGEST_SYSTEM = `You help a person write a response to a task. Given the task, the document, and the person's draft so far, suggest 5 different short phrases (1 to 4 words each) that could come next, continuing directly from the end of the draft. Order them from most to least likely. Give only the continuation text, not the draft.`;
+
+const SUGGEST_SCHEMA = {
+  type: "object",
+  properties: {suggestions: {type: "array", items: {type: "string"}}},
+  required: ["suggestions"],
+};
+
+async function fetchSuggestions(signal) {
+  const draft = $("draft").value;
+  setStatus("Asking for suggestions…");
+  const t0 = performance.now();
+  // Stable content (system, task, document) first; the draft, which changes on every keystroke, last.
+  const {result, usage} = await chatJSON([
+    {role: "system", content: SUGGEST_SYSTEM},
+    {role: "user", content: `Task: ${$("instruction").value}\n\nDocument:\n${$("doc").value}\n\nDraft so far:\n${draft}`},
+  ], SUGGEST_SCHEMA, {maxTokens: 100, signal});
+  setStatus(`Suggested in ${Math.round(performance.now() - t0)} ms (${usage.completion_tokens} tokens generated)`);
+  renderSuggestions(draft, result.suggestions.slice(0, 5));
+}
+
+// The model gives bare phrases, so we decide the spacing: add a space unless the draft
+// already ends in whitespace or the phrase starts with punctuation.
+function joinPhrase(draft, phrase) {
+  phrase = phrase.replace(/^ +/, "");
+  const needsSpace = draft && !/\s$/.test(draft) && !/^[.,;:!?)'’"]/.test(phrase);
+  return draft + (needsSpace ? " " : "") + phrase;
+}
+
+function renderSuggestions(draft, suggestions) {
+  const container = $("suggestions");
+  container.innerHTML = "";
+  for (const phrase of suggestions) {
+    const btn = document.createElement("button");
+    btn.textContent = showToken(phrase);
+    btn.addEventListener("click", () => {
+      $("draft").value = joinPhrase(draft, phrase);
+      $("draft").focus();
+      updateSuggestions();
+    });
+    container.appendChild(btn);
+  }
+}
+
+// ── Wiring ─────────────────────────────────────────────────────────────────
+
+const updateEdits = debounced(fetchEdits, 800);
+const updateSuggestions = debounced(fetchSuggestions);
+$("instruction").addEventListener("input", () => { updateEdits(); updateSuggestions(); });
+$("doc").addEventListener("input", () => { updateEdits(); updateSuggestions(); });
+$("draft").addEventListener("input", () => updateSuggestions());
+$("show-alts").addEventListener("change", e => $("highlighted").classList.toggle("show-alts", e.target.checked));
+
+loadModel().then(() => { updateEdits(); updateSuggestions(); }, err => setStatus("Error: " + err.message));
+</script>
+</body>
+</html>
