@@ -96,41 +96,65 @@ function renderHighlights() {
 
 const NUM_SUGGESTIONS = 5;
 
+// Qwen3.5's pre-tokenizer split (transformers tokenization_qwen3_5.py), with the (?i:...)
+// group expanded because not all browsers support inline modifiers. BPE merges never cross
+// these boundaries, so typing more text can only change the tokens of the last chunk.
+const PRETOKENIZE_REGEX = /'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD]|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu;
+
+// Split text into [everything before the last pre-token chunk, the last chunk].
+function splitLastPretoken(text) {
+  let start = text.length;
+  for (const match of text.matchAll(PRETOKENIZE_REGEX)) start = match.index;
+  return [text.slice(0, start), text.slice(start)];
+}
+
+// Constrain generation to output that starts with `text`.
+function startsWith(text) {
+  const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return {structured_outputs: {regex: escaped + "[\\s\\S]*"}};
+}
+
 async function fetchSuggestions(signal) {
-  // A trailing space would be its own token ("Ġ"). After "to", the model gives that token
-  // ~1e-7 probability (spaces normally merge into the next word, as in "Ġlet"), so what it
-  // predicts after it is unreliable. Instead, predict from the text without the trailing
-  // spaces and keep only candidates that start with those spaces.
+  // If the draft ends partway through a token (e.g. "Use de" = "Use" + "Ġde", where "deep"
+  // would be the single token "Ġdeep"), the model infers the word *isn't* one that has a longer
+  // token, and predicts "depleting". So back up to the last pre-token boundary, which every
+  // tokenization of the full text shares, and constrain the output to start with the text we
+  // backed over. The model then picks its own tokenization (e.g. "Ġdeep").
   const draft = $("draft").value;
-  const base = draft.replace(/ +$/, "");
-  const trailing = draft.slice(base.length);
+  const [base, typed] = splitLastPretoken(draft);
   setStatus("Predicting…");
   const t0 = performance.now();
   const prefix = await chatPrefix(taskMessages($("instruction").value, $("doc").value));
   const prompt = prefix.text + base;
-  const res = await completions({prompt, max_tokens: 1, logprobs: 20, temperature: 0}, signal);
-  const candidates = Object.entries(res.choices[0].logprobs.top_logprobs[0])
-    .sort((a, b) => b[1] - a[1])
-    .filter(([tok]) => tok.startsWith(trailing) && !/^<\|.*\|>$/.test(tok))
-    .slice(0, NUM_SUGGESTIONS);
-  // Show the raw next tokens right away; the lookahead below refines them.
-  renderSuggestions(base, candidates.map(([tok, logprob]) => ({text: tok, prob: Math.exp(logprob)})));
-  if (candidates.length === 0) return;
+  const res = await completions({prompt, max_tokens: 1, logprobs: 20, temperature: 0, ...(typed && startsWith(typed))}, signal);
 
-  // Most tokens are whole words, but some are word pieces; extend each candidate greedily
-  // a few tokens (all candidates in one batched request) so we can cut it at a word boundary.
+  // Each candidate first token fixes what the output starts with: the token itself if it
+  // covers what was typed, else just the typed text (the model will spell out the rest).
+  // Probabilities are already conditioned on the constraint (the server renormalizes them).
+  const branches = new Map();  // forced start -> total probability
+  for (const [tok, logprob] of Object.entries(res.choices[0].logprobs.top_logprobs[0])) {
+    if (/^<\|.*\|>$/.test(tok) || !(tok.startsWith(typed) || typed.startsWith(tok))) continue;
+    const forced = tok.length >= typed.length ? tok : typed;
+    branches.set(forced, (branches.get(forced) ?? 0) + Math.exp(logprob));
+  }
+  const top = [...branches].sort((a, b) => b[1] - a[1]).slice(0, NUM_SUGGESTIONS);
+
+  // Show the first tokens right away; the lookahead below refines them.
+  renderSuggestions(draft, top.map(([forced, prob]) => ({text: forced.slice(typed.length), prob})).filter(s => s.text));
+  if (top.length === 0) return;
+
+  // Most tokens are whole words, but some are word pieces; extend each branch greedily so we
+  // can cut it at a word boundary. Each branch restarts from the boundary with its own
+  // constraint (appending a partial token to the prompt would reintroduce the problem above),
+  // so they're separate requests, sent in parallel.
   const wordsWanted = +$("words-per-suggestion").value;
-  const cont = await completions({
-    prompt: candidates.map(([tok]) => prompt + tok),
-    max_tokens: 2 * wordsWanted,
-    temperature: 0,
-  }, signal);
-  const suggestions = cont.choices.sort((a, b) => a.index - b.index).map((choice, i) => {
-    const [tok, logprob] = candidates[i];
-    return {text: firstWords(tok + choice.text, wordsWanted), prob: Math.exp(logprob)};
-  });
+  const suggestions = await Promise.all(top.map(async ([forced, prob]) => {
+    const cont = await completions({prompt, max_tokens: 2 * wordsWanted + 4, temperature: 0, ...startsWith(forced)}, signal);
+    return {text: firstWords(cont.choices[0].text.slice(typed.length), wordsWanted), prob};
+  }));
+  const unique = suggestions.filter((s, i) => s.text && suggestions.findIndex(t => t.text === s.text) === i);
   setStatus(`Predicted in ${Math.round(performance.now() - t0)} ms`);
-  renderSuggestions(base, suggestions);
+  renderSuggestions(draft, unique);
 }
 
 // Leading whitespace plus the first n whitespace-delimited words.
@@ -139,7 +163,7 @@ function firstWords(text, n) {
   return match ? match[0] : text;
 }
 
-function renderSuggestions(base, suggestions) {
+function renderSuggestions(draft, suggestions) {
   const container = $("suggestions");
   container.innerHTML = "";
   for (const {text, prob} of suggestions) {
@@ -149,7 +173,7 @@ function renderSuggestions(base, suggestions) {
     small.textContent = `${Math.round(prob * 100)}%`;
     btn.appendChild(small);
     btn.addEventListener("click", () => {
-      $("draft").value = base + text;
+      $("draft").value = draft + text;
       $("draft").focus();
       updateSuggestions();
     });
