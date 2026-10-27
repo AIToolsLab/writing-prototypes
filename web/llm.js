@@ -27,32 +27,30 @@ async function loadModel() {
   return MODEL;
 }
 
-// The chat-templated prompt for `messages`, ending with the assistant generation prompt.
-async function tokenizeChatPrefix(messages, signal) {
-  const data = await post("/tokenize", {
-    model: MODEL,
-    messages,
-    add_generation_prompt: true,
-    chat_template_kwargs: CHAT_TEMPLATE_KWARGS,
-  }, signal);
-  return data.tokens;
-}
-
-// Raw text, no special tokens. Kept separate from the chat template so Jinja can't
-// trim whitespace: we tokenize the prefix and the response text separately and concatenate ids.
-async function tokenizeText(text, signal) {
-  if (!text) return [];
-  const data = await post("/tokenize", {model: MODEL, prompt: text, add_special_tokens: false}, signal);
-  return data.tokens;
-}
-
-// Token ids for: chat template + assistant response so far.
-async function tokenizeConversation(messages, responseSoFar, signal) {
-  const [prefix, response] = await Promise.all([
-    tokenizeChatPrefix(messages, signal),
-    tokenizeText(responseSoFar, signal),
-  ]);
-  return {prefix, response, all: prefix.concat(response)};
+// The chat-templated prompt for `messages`, ending with the assistant generation prompt,
+// as both token ids and text. We append the response text to `text` ourselves rather than
+// passing it through the chat template, so Jinja can't trim its whitespace. The server parses
+// special-token strings in text prompts, so `text + response` tokenizes the same as the
+// template's ids followed by the response's ids.
+let prefixCache = {key: null, promise: null};
+function chatPrefix(messages) {
+  const key = JSON.stringify(messages);
+  if (prefixCache.key !== key) {
+    // Not tied to any one caller's AbortSignal, since the result is shared.
+    const promise = (async () => {
+      const {tokens} = await post("/tokenize", {
+        model: MODEL,
+        messages,
+        add_generation_prompt: true,
+        chat_template_kwargs: CHAT_TEMPLATE_KWARGS,
+      });
+      const {prompt} = await post("/detokenize", {model: MODEL, tokens});
+      return {ids: tokens, text: prompt};
+    })();
+    promise.catch(() => { if (prefixCache.promise === promise) prefixCache = {key: null, promise: null}; });
+    prefixCache = {key, promise};
+  }
+  return prefixCache.promise;
 }
 
 async function completions(body, signal) {
@@ -82,7 +80,7 @@ function showToken(tok) {
 }
 
 // Run `fn` after the user pauses typing; abort the previous in-flight call.
-function debounced(fn, ms = 400) {
+function debounced(fn, ms = 150) {
   let timer = null, controller = null;
   return (...args) => {
     clearTimeout(timer);

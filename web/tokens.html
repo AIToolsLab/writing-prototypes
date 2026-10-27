@@ -50,14 +50,14 @@ async function fetchHighlights(signal) {
   if (!doc.trim()) { spans = []; renderHighlights(); return; }
   setStatus("Scoring document…");
   const t0 = performance.now();
-  const ids = await tokenizeConversation(taskMessages($("instruction").value, doc), doc, signal);
-  const res = await completions({prompt: ids.all, max_tokens: 1, prompt_logprobs: 5}, signal);
-  const promptLogprobs = res.choices[0].prompt_logprobs;
+  const prefix = await chatPrefix(taskMessages($("instruction").value, doc));
+  const res = await completions({prompt: prefix.text + doc, max_tokens: 1, prompt_logprobs: 5, return_token_ids: true}, signal);
+  const {prompt_logprobs: promptLogprobs, prompt_token_ids: promptIds} = res.choices[0];
 
   // prompt_logprobs[i] is the distribution at position i, keyed by token id; it always
   // includes the actual token, plus the top-k (rank 1 is the model's top choice).
-  spans = ids.response.map((id, j) => {
-    const dist = promptLogprobs[ids.prefix.length + j];
+  spans = promptIds.slice(prefix.ids.length).map((id, j) => {
+    const dist = promptLogprobs[prefix.ids.length + j];
     const actual = dist[String(id)];
     const top = Object.values(dist).find(e => e.rank === 1);
     return {
@@ -97,31 +97,38 @@ function renderHighlights() {
 const NUM_SUGGESTIONS = 5;
 
 async function fetchSuggestions(signal) {
-  // A trailing space would become its own token (e.g. "Ġ"), which the model almost never
-  // produces before a word, so predictions after it are junk. Instead, predict from the text
-  // without the trailing spaces and keep only candidates that start with those spaces.
+  // A trailing space would be its own token ("Ġ"). After "to", the model gives that token
+  // ~1e-7 probability (spaces normally merge into the next word, as in "Ġlet"), so what it
+  // predicts after it is unreliable. Instead, predict from the text without the trailing
+  // spaces and keep only candidates that start with those spaces.
   const draft = $("draft").value;
   const base = draft.replace(/ +$/, "");
   const trailing = draft.slice(base.length);
-  const messages = taskMessages($("instruction").value, $("doc").value);
-
   setStatus("Predicting…");
   const t0 = performance.now();
-  const ids = await tokenizeConversation(messages, base, signal);
-  const res = await completions({prompt: ids.all, max_tokens: 1, logprobs: 20, temperature: 0}, signal);
+  const prefix = await chatPrefix(taskMessages($("instruction").value, $("doc").value));
+  const prompt = prefix.text + base;
+  const res = await completions({prompt, max_tokens: 1, logprobs: 20, temperature: 0}, signal);
   const candidates = Object.entries(res.choices[0].logprobs.top_logprobs[0])
     .sort((a, b) => b[1] - a[1])
     .filter(([tok]) => tok.startsWith(trailing) && !/^<\|.*\|>$/.test(tok))
     .slice(0, NUM_SUGGESTIONS);
+  // Show the raw next tokens right away; the lookahead below refines them.
+  renderSuggestions(base, candidates.map(([tok, logprob]) => ({text: tok, prob: Math.exp(logprob)})));
+  if (candidates.length === 0) return;
 
   // Most tokens are whole words, but some are word pieces; extend each candidate greedily
-  // a few tokens so we can cut it at a word boundary.
+  // a few tokens (all candidates in one batched request) so we can cut it at a word boundary.
   const wordsWanted = +$("words-per-suggestion").value;
-  const suggestions = await Promise.all(candidates.map(async ([tok, logprob]) => {
-    const branch = ids.all.concat(await tokenizeText(tok, signal));
-    const cont = await completions({prompt: branch, max_tokens: 2 + 2 * wordsWanted, temperature: 0}, signal);
-    return {text: firstWords(tok + cont.choices[0].text, wordsWanted), prob: Math.exp(logprob)};
-  }));
+  const cont = await completions({
+    prompt: candidates.map(([tok]) => prompt + tok),
+    max_tokens: 2 * wordsWanted,
+    temperature: 0,
+  }, signal);
+  const suggestions = cont.choices.sort((a, b) => a.index - b.index).map((choice, i) => {
+    const [tok, logprob] = candidates[i];
+    return {text: firstWords(tok + choice.text, wordsWanted), prob: Math.exp(logprob)};
+  });
   setStatus(`Predicted in ${Math.round(performance.now() - t0)} ms`);
   renderSuggestions(base, suggestions);
 }
