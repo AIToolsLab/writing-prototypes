@@ -7,13 +7,107 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<h1>Writing Tools Prototypes</h1>
-<p>by <a href="https://kenarnold.org">Ken Arnold</a> and the <a href="https://thoughtful-ai.com/">Thoughtful AI Tools Lab</a> at Calvin University.</p>
-<p>Two ways to do the same two things (highlight where the AI would write differently; predict what you might type next), both against a stock vLLM server:</p>
-<ul>
-  <li><a href="tokens.html">Token-level</a>: reads the model's next-token log-probabilities directly.</li>
-  <li><a href="structured.html">Structured</a>: asks the model, via chat, to describe edits and suggestions as JSON.</li>
-</ul>
-<p class="hint">Add <code>?server=https://your-vllm-host</code> to use a different server. These pages send your text to that server, which may log requests; don't use sensitive information.</p>
+<header>
+  <h1>Writing Tools Prototypes</h1>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-mode="highlights">🖍️ Highlights</button>
+    <button role="tab" data-mode="predict">📝 Predictive text</button>
+  </nav>
+  <label class="inline engine" title="How we get the model's opinion. Tokens reads next-token probabilities directly; Structured asks the model, via chat, to describe edits or suggestions as JSON.">
+    Engine
+    <select id="engine">
+      <option value="tokens">Tokens</option>
+      <option value="structured">Structured</option>
+    </select>
+    <span id="engine-note" class="hint"></span>
+  </label>
+</header>
+
+<section id="prompt-section">
+  <details id="prompt-picker">
+    <summary><span class="label">Prompt</span> <span id="prompt-text"></span> <span class="hint change">change</span></summary>
+    <div class="panel">
+      <div class="label">Rewrite this document to be…</div>
+      <div class="chips" id="rewrite-chips"></div>
+      <div class="predict-only">
+        <div class="label">Or write something from it</div>
+        <div class="chips" id="generate-chips"></div>
+      </div>
+      <label for="instruction">Or write your own</label>
+      <textarea id="instruction" rows="2"></textarea>
+    </div>
+  </details>
+</section>
+
+<section id="highlights-view">
+  <label for="doc">Document <span class="hint">· highlights mark where the AI would have written something different; hover one to see what</span></label>
+  <div id="doc-slot-highlights">
+    <div id="doc-editor" class="overlay-editor">
+      <div id="doc-backdrop" class="backdrop" aria-hidden="true"></div>
+      <textarea id="doc" class="editor" spellcheck="false">Deep learning neural network technology advances are pretty cool if you are careful to use it in ways that don't take stuff from people.</textarea>
+    </div>
+  </div>
+  <div class="controls">
+    <label class="inline" id="num-highlights-control">Show top <input type="range" id="num-highlights" min="0" max="30" value="8"> <span id="num-highlights-label"></span></label>
+    <label class="inline"><input type="checkbox" id="show-alts"> Show alternatives above the text</label>
+  </div>
+  <div id="highlights-message" class="message"></div>
+  <div id="highlights-status" class="status"></div>
+  <div id="highlights-warning" class="warning"></div>
+</section>
+
+<section id="rewrite-view">
+  <div class="columns">
+    <div>
+      <label for="doc">Document</label>
+      <div id="doc-slot-rewrite"></div>
+    </div>
+    <div>
+      <label for="draft">Your response</label>
+      <textarea id="draft" class="editor" placeholder="Start typing, or pick a suggestion below."></textarea>
+      <div id="predict-slot-rewrite"></div>
+    </div>
+  </div>
+  <p class="hint">This is a one-turn conversation: you ask for the prompt applied to the document, then write the AI's response yourself, with its predictions.
+    <a href="#" id="to-chat">Continue it as a conversation →</a></p>
+</section>
+
+<section id="chat-view">
+  <div class="chat-head">
+    <a href="#" id="to-rewrite">← Back to rewrite</a>
+    <button id="chat-reset">Start a new conversation</button>
+  </div>
+  <p class="hint">You write both sides. Predictions show what the model would say in each role.</p>
+  <div id="chat-history"></div>
+  <div id="chat-current" class="bubble in-progress">
+    <div class="role"><span id="chat-role"></span></div>
+    <textarea id="chat-draft" class="editor" placeholder="Start typing, or pick a suggestion below."></textarea>
+    <div id="predict-slot-chat"></div>
+    <button id="chat-send">Send <kbd id="send-key"></kbd></button>
+  </div>
+</section>
+
+<div id="predict-panel">
+  <div id="suggestions"></div>
+  <div class="controls">
+    <label class="inline">Words per suggestion <select id="words"><option>1</option><option>2</option><option>3</option></select></label>
+    <span class="hint" id="keys-hint"></span>
+  </div>
+  <div id="predict-status" class="status"></div>
+  <div id="predict-warning" class="warning"></div>
+</div>
+
+<footer>
+  <p>by <a href="https://kenarnold.org">Ken Arnold</a> and the <a href="https://thoughtful-ai.com/">Thoughtful AI Tools Lab</a> at Calvin University.
+  This page sends your text to <code id="server"></code>, which may log requests; don't use sensitive information.
+  Add <code>?server=https://your-vllm-host</code> to the URL to use a different vLLM server.</p>
+</footer>
+
+<div id="tooltip" hidden></div>
+
+<script src="llm.js"></script>
+<script src="engine-tokens.js"></script>
+<script src="engine-structured.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
