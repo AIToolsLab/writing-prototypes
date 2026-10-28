@@ -1,0 +1,138 @@
+1. The regex fixes the text, not its tokenization. For typed 'Used', greedy decoding under
+   the constraint picks 'Use' (the model was heading for 'Use deep learning…'), then must
+   produce a 'd', so takes 'deep'. The reported logprobs are after the grammar mask, so the
+   junk path looks certain:
+     'Use'            logprob -0.00
+     'deep'           logprob -0.00
+     ' learning'      logprob -0.00
+     ' responsibly'   logprob -0.23
+   Unconstrained, the raw P('Used') at that point is -8.65 (rank 62), and after it
+   the model continues with [' eth', ' responsibly', ' carefully', ' appropriately', ' respectfully'].
+
+2. Without healing, a typed token implies the word ends there. 'Use de' is 'Use' + ' de', and
+   ' deep' is its own token, so after ' de' the model avoids 'ep':
+     after ' de':      ["'ple' -2.0", "'cept' -2.5", "' novo' -2.5", "'-learning' -2.9", "'ont' -3.4", "'pl' -3.4", "'-' -3.7", "'conv' -3.8"]
+     after 'Use' (raw): ["' deep' -0.0", "' advanced' -6.5", "' neural' -7.0", "' ethical' -7.6", "' Deep' -7.9"]
+   Same for 'Deep neural net': after the token ' net', 'works' is unlikely, though ' networks'
+   is the likeliest token at the boundary:
+     after ' net':      ["' advancements' -0.9", "' advances' -1.5", "' technology' -1.5", "' technologies' -3.3", "' progress' -4.4"]
+     after 'Deep neural': ["' networks' -0.5", "' network' -0.9", "' advancements' -7.8", "' advances' -7.9", "' nets' -8.0"]
+
+
+''  typed=''  want: anything
+  ✓ naive              'Use' -1.0 | 'Use deep' -1.0 | 'Use deep learning' -1.0 | 'Here' -1.3
+  ✓ healed_only        'Use' -1.0 | 'Use deep' -1.0 | 'Use deep learning' -1.0 | 'Here' -1.3
+  ✓ merge              'Use' -1.0 | 'Use deep' -1.0 | 'Use deep learning' -1.0 | 'Here' -1.3
+  ✓ continuation_mass  'Use' -1.0 | 'Use deep' -1.0 | 'Use deep learning' -1.0 | 'Here' -1.3
+  ✓ boundary_topk      'Use' -1.0 | 'Use deep' -1.0 | 'Use deep learning' -1.0 | 'Here' -1.3
+  ✓ hybrid             'Use' -1.0 | 'Use deep' -1.0 | 'Use deep learning' -1.0 | 'Here' -1.3
+  ✓ hybrid_bounded     'Use' -1.0 | 'Use deep' -1.0 | 'Use deep learning' -1.0 | 'Here' -1.3
+
+'Used'  typed='Used'  want: a new word (' ethically'), not 'Usedeep'
+  healed spine tokens: ['Use', 'deep', ' learning', ' responsibly']
+  ✓ naive              ' eth' -0.6 | ' ethically' -0.6 | ' ethically,' -0.6 | ' responsibly' -0.8
+  ✗ healed_only        'eep' -0.0 | 'eep learning' -0.0 | 'eep learning responsibly' -0.2 | 'eep learning eth' -2.0
+  ✗ merge              'eep' -0.0 | 'eep learning' -0.0 | 'eep learning responsibly' -0.2 | 'eep learning eth' -2.0
+  ✓ continuation_mass  ' eth' -9.2 | ' ethically' -9.2 | ' ethically,' -9.3 | ' responsibly' -9.5
+  ✓ boundary_topk      ' eth' -9.2 | ' ethically' -9.2 | ' ethically,' -9.3 | ' responsibly' -9.5
+  ✓ hybrid             ' eth' -9.2 | ' ethically' -9.2 | ' ethically,' -9.3 | ' responsibly' -9.5
+  ✓ hybrid_bounded     ' eth' -9.2 | ' ethically' -9.2 | ' ethically,' -9.3 | ' responsibly' -9.5
+
+'Use de'  typed=' de'  want: 'ep' (deep), not 'pleting'
+  healed spine tokens: [' deep', ' learning', ' responsibly', ' to']
+  ✗ naive              'ple' -2.0 | ' novo' -2.5 | 'cept' -2.5 | 'pleting' -2.8
+  ✓ healed_only        'ep' -0.0 | 'ep learning' -0.0 | 'ep learning responsibly' -0.3 | 'ep learning responsibly to' -0.4
+  ✓ merge              'ep' -0.0 | 'ep learning' -0.0 | 'ep learning responsibly' -0.3 | 'ep learning responsibly to' -0.4
+  ✓ continuation_mass  'ep' -15.6 | 'ep learning' -15.6 | 'ep learning responsibly' -15.9 | 'ep learning responsibly to' -15.9
+  ✓ boundary_topk      'ep' -0.0 | 'ple' -17.3 | ' novo' -17.8 | 'cept' -17.8
+  ✓ hybrid             'ep' -0.0 | 'ep learning' -0.0 | 'ep learning responsibly' -0.3 | 'ep learning responsibly to' -0.4
+  ✓ hybrid_bounded     'ep' -0.0 | 'ep learning' -0.0 | 'ep learning responsibly' -0.3 | 'ep learning responsibly to' -0.4
+
+'Use deep lear'  typed=' lear'  want: 'ning'
+  healed spine tokens: [' learning', ' responsibly', ' to', ' avoid', ' infr']
+  ✗ naive              'ining' -1.0 | 'ining neural' -1.7 | 'ining neural networks' -1.7 | 'ng' -2.0
+  ✓ healed_only        'ning' -0.0 | 'ning responsibly' -0.3 | 'ning responsibly to' -0.3 | 'ning responsibly to avoid' -1.2
+  ✓ merge              'ning' -0.0 | 'ning responsibly' -0.3 | 'ning responsibly to' -0.3 | 'ning responsibly to avoid' -1.2
+  ✓ continuation_mass  'ning' -18.7 | 'ning responsibly' -19.0 | 'ning responsibly to' -19.0 | 'ning responsibly to avoid' -19.8
+  ✓ boundary_topk      'ning' -0.0 | 'n' -11.6 | 'ned' -13.8 | 'ining' -19.5
+  ✓ hybrid             'ning' -0.0 | 'ning responsibly' -0.3 | 'ning responsibly to' -0.3 | 'ning responsibly to avoid' -1.2
+  ✓ hybrid_bounded     'ning' -0.0 | 'ning responsibly' -0.3 | 'ning responsibly to' -0.3 | 'ning responsibly to avoid' -1.2
+
+'Deep learning is pow'  typed=' pow'  want: 'erful'
+  healed spine tokens: [' powerful', ',', ' provided', ' it']
+  ✗ naive              'eful' -1.1 | 'eful,' -1.6 | 'eful, provided' -2.3 | 'eful, but' -2.4
+  ✓ healed_only        'erful' -0.0 | 'erful,' -0.2 | 'erful, provided' -0.6 | 'erful, provided it' -0.6
+  ✓ merge              'erful' -0.0 | 'erful,' -0.2 | 'erful, provided' -0.6 | 'erful, provided it' -0.6
+  ✓ continuation_mass  'erful' -15.0 | 'erful,' -15.2 | 'erful, provided' -15.6 | 'erful, provided it' -15.6
+  ✓ boundary_topk      'erful' -1.6 | 'eful' -16.1 | 'eful,' -16.6 | 'eful, provided' -17.2
+  ✓ hybrid             'erful' -1.6 | 'erful,' -1.8 | 'erful, provided' -2.1 | 'erful, provided it' -2.2
+  ✓ hybrid_bounded     'erful' -1.6 | 'erful,' -1.8 | 'erful, provided' -2.1 | 'erful, provided it' -2.2
+
+'Deep learning techn'  typed=' techn'  want: 'olog…'
+  healed spine tokens: [' technology', ' is', ' promising', ',', ' provided']
+  ✗ naive              'ol' -1.2 | 'ologic' -1.8 | 'ologically' -1.9 | 'olgy' -2.6
+  ✓ healed_only        'ology' -0.1 | 'ology is' -0.2 | 'ology is promising' -0.9 | 'ology is promising,' -1.0
+  ✓ merge              'ology' -0.1 | 'ology is' -0.2 | 'ology is promising' -0.9 | 'ology is promising,' -1.0
+  ✓ continuation_mass  'ology' -13.1 | 'ology is' -13.3 | 'ology is promising' -13.9 | 'ology is promising,' -14.0
+  ✓ boundary_topk      'ology' -3.1 | 'ologies' -5.6 | 'ol' -14.2 | 'ologic' -14.8
+  ✓ hybrid             'ology' -3.1 | 'ology is' -3.2 | 'ology is promising' -3.9 | 'ology is promising,' -4.0
+  ✓ hybrid_bounded     'ology' -3.1 | 'ology is' -3.2 | 'ology is promising' -3.9 | 'ology is promising,' -4.0
+
+'Deep neural net'  typed=' net'  want: 'work(s)', not ' advancements'
+  healed spine tokens: [' networks', ' are', ' powerful', ',']
+  ✗ naive              ' advancements' -0.9 | ' advancements are' -1.0 | ' technology' -1.4 | ' advancements are promising' -1.5
+  ✓ healed_only        'works' -0.5 | 'works are' -0.9 | 'work' -1.0 | 'works are powerful' -1.5
+  ✓ merge              'works' -0.5 | 'works are' -0.9 | 'work' -1.0 | 'works are powerful' -1.5
+  ✗ continuation_mass  ' advancements' -9.2 | ' advancements are' -9.3 | ' technology' -9.7 | ' advancements are promising' -9.8
+  ✓ boundary_topk      'works' -0.5 | 'work' -1.0 | 's' -8.0 | 'working' -8.4
+  ✓ hybrid             'works' -0.5 | 'works are' -0.9 | 'work' -1.0 | 'works are powerful' -1.5
+  ✓ hybrid_bounded     'works' -0.5 | 'works are' -0.9 | 'work' -1.0 | 'works are powerful' -1.5
+
+'Deep learning is'  typed=' is'  want: a new word
+  healed spine tokens: [' is', ' a', ' powerful', ' technology']
+  ✓ naive              ' a' -0.7 | ' a powerful' -1.0 | ' a powerful technology' -1.1 | ' powerful' -1.6
+  ✓ healed_only        ' a' -0.7 | ' a powerful' -1.0 | ' a powerful technology' -1.1 | ' powerful' -1.7
+  ✓ merge              ' a' -0.7 | ' a powerful' -1.0 | ' a powerful technology' -1.1 | ' powerful' -1.7
+  ✓ continuation_mass  ' a' -2.0 | ' a powerful' -2.3 | ' a powerful technology' -2.4 | ' powerful' -2.9
+  ✓ boundary_topk      ' a' -2.0 | ' a powerful' -2.3 | ' a powerful technology' -2.4 | ' powerful' -2.9
+  ✓ hybrid             ' a' -2.0 | ' a powerful' -2.3 | ' a powerful technology' -2.4 | ' powerful' -2.9
+  ✓ hybrid_bounded     ' a' -2.0 | ' a powerful' -2.3 | ' a powerful technology' -2.4 | ' powerful' -2.9
+
+'Deep learning is a powerful technology, but we must use it resp'  typed=' resp'  want: 'onsibl…'
+  healed spine tokens: [' responsibly', ' to', ' protect', ' people', '’s']
+  ✗ naive              'ct' -2.4 | 'ctfully' -2.4 | 'ctfully to' -2.6 | ' ect' -2.6
+  ✓ healed_only        'onsibly' -0.0 | 'onsibly to' -0.0 | 'onsibly to protect' -1.0 | 'onsibly to protect people' -1.2
+  ✓ merge              'onsibly' -0.0 | 'onsibly to' -0.0 | 'onsibly to protect' -1.0 | 'onsibly to protect people' -1.2
+  ✓ continuation_mass  'onsibly' -15.5 | 'onsibly to' -15.5 | 'onsibly to protect' -16.5 | 'onsibly to protect people' -16.7
+  ✓ boundary_topk      'onsibly' -0.7 | 'ectfully' -7.2 | 'onsible' -8.5 | 'ons' -9.7
+  ✓ hybrid             'onsibly' -0.7 | 'onsibly to' -0.7 | 'onsibly to protect' -1.7 | 'onsibly to protect people' -1.9
+  ✓ hybrid_bounded     'onsibly' -0.7 | 'onsibly to' -0.7 | 'onsibly to protect' -1.7 | 'onsibly to protect people' -1.9
+
+'Deep learning advances are impressive but ethically questionab'  typed=' questionab'  want: 'le'
+  healed spine tokens: [' questionable', '.', ' They', ' should', ' be', ' used']
+  ✗ naive              'ale' -1.2 | 'ale if' -2.2 | 'ale.' -2.3 | ' le' -2.5
+  ✓ healed_only        'le' -0.0 | 'le.' -1.0 | 'le if' -1.2 | 'le due' -2.0
+  ✓ merge              'le' -0.0 | 'le.' -1.0 | 'le if' -1.2 | 'le due' -2.0
+  ✓ continuation_mass  'le' -18.9 | 'le.' -19.8 | 'le if' -20.1 | 'le due' -20.8
+  ✗ boundary_topk      'ale' -19.7 | 'ale if' -20.7 | 'ale.' -20.8 | ' le' -21.0
+  ✗ hybrid             'ale' -19.7 | 'ale if' -20.7 | 'ale.' -20.8 | ' le' -21.0
+  ✓ hybrid_bounded     'le' -6.2 | 'le.' -7.2 | 'le if' -7.4 | 'le due' -8.2
+
+'Deep learning technology is revolutionizi'  typed=' revolutionizi'  want: 'ng'
+  healed spine tokens: [' revolution', 'izing', ' various', ' fields', ',', ' provided', ' it']
+  ✗ naive              'ing' -0.3 | 'ing various' -1.6 | 'ing various fields' -1.6 | 'ing industries' -1.9
+  ✓ healed_only        'ng' -0.1 | 'ng various' -1.2 | 'ng various fields' -1.2 | 'ng various fields,' -1.3
+  ✓ merge              'ng' -0.1 | 'ng various' -1.2 | 'ng various fields' -1.2 | 'ng various fields,' -1.3
+  ✓ continuation_mass  'ng' -26.9 | 'ng various' -27.9 | 'ng various fields' -28.0 | 'ng various fields,' -28.1
+  ✗ boundary_topk      'ing' -26.9 | 'ing various' -28.3 | 'ing various fields' -28.3 | 'ing industries' -28.5
+  ✗ hybrid             'ing' -26.9 | 'ing various' -28.3 | 'ing various fields' -28.3 | 'ing industries' -28.5
+  ✗ hybrid_bounded     'ing' -26.9 | 'ing various' -28.3 | 'ing various fields' -28.3 | 'ing industries' -28.5
+
+Top suggestion as wanted, out of 11:
+  naive              3
+  healed_only        10
+  merge              10
+  continuation_mass  10
+  boundary_topk      9
+  hybrid             9
+  hybrid_bounded     10

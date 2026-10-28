@@ -1,0 +1,35 @@
+
+✓ ""  want: anything  (Predicted in 364 ms)
+  "Use deep" -1.0 | "Here are" -1.3 | "Deep learning" -2.2 | "Responsible use" -2.8 | "Advances in" -3.3
+
+✓ "Used"  want: a new word (' ethically'), not 'Usedeep'  (Predicted in 481 ms)
+  " ethically, deep" -9.2 | " responsibly, deep" -9.5 | " ethically and" -13.6 | " ethically to" -13.8 | "eep learning" -13.9
+
+✓ "Use de"  want: 'ep' (deep), not 'pleting'  (Predicted in 394 ms)
+  "ep learning" -0.0 | "ep neural" -4.9 | "ep responsibly" -10.4 | "ep-learning neural" -10.9 | "ep Learning" -11.6
+
+✓ "Use deep lear"  want: 'ning'  (Predicted in 470 ms)
+  "ning responsibly" -0.0 | "ning ethically" -1.7 | "ning technology" -3.9 | "ning technologies" -4.3 | "ning responsibly." -4.5
+
+✓ "Deep learning is pow"  want: 'erful'  (Predicted in 467 ms)
+  "erful, provided" -1.7 | "erful, but" -3.1 | "erful when" -3.9 | "erful but" -4.3
+
+✓ "Deep learning techn"  want: 'olog…'  (Predicted in 418 ms)
+  "ology is" -3.1 | "ology offers" -5.3 | "ologies are" -5.6 | "ology holds" -6.8 | "ology advances" -8.3
+
+✓ "Deep neural net"  want: 'work(s)', not ' advancements'  (Predicted in 464 ms)
+  "works are" -0.5 | "work technology" -0.9 | "works offer" -1.8 | "works hold" -4.5 | "works show" -5.4
+
+✓ "Deep learning is"  want: a new word  (Predicted in 384 ms)
+  " a powerful" -2.0 | " powerful, provided" -2.9 | " promising, provided" -3.1 | " a promising" -3.6 | " impressive, provided" -4.5
+
+✓ "Deep learning is a powerful technology, but we must use it resp"  want: 'onsibl…'  (Predicted in 426 ms)
+  "onsibly to" -0.8 | "onsibly and" -4.5 | "onsibly. This" -6.0 | "ectfully to" -7.1 | "onsibly by" -7.9
+
+✓ "Deep learning advances are impressive but ethically questionab"  want: 'le' (the covering token ' questionable' isn't in the raw top 20)  (Predicted in 466 ms)
+  "le. They" -7.2 | "le if" -8.4 | "le due" -9.2 | "le, as" -9.6 | "le when" -10.4
+
+✓ "Deep learning technology is revolutionizi"  want: 'ng' (no single token covers it: ' revolution' + 'izing')  (Predicted in 463 ms)
+  "ng various" -11.1 | "ng industries," -12.5 | "ng many" -13.5 | "ng the" -13.7 | "ng AI," -13.7
+
+Top suggestion as wanted: 11 of 11

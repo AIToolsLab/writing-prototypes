@@ -81,7 +81,7 @@ async function tokenSuggestions({messages, words, onUpdate}, signal) {
   // If the draft ends partway through a token (e.g. "Use de" = "Use" + "Ġde", where "deep"
   // would be the single token "Ġdeep"), the model infers the word *isn't* one that has a longer
   // token, and predicts "depleting". So back up to the last pre-token boundary, which every
-  // tokenization of the full text shares, and look for continuations that start with the text we
+  // tokenization of the full text shares, and constrain the output to start with the text we
   // backed over. The model then picks its own tokenization (e.g. "Ġdeep").
   const {role, content: draft} = messages.at(-1);
   const [base, typed] = splitLastPretoken(draft);
@@ -92,43 +92,31 @@ async function tokenSuggestions({messages, words, onUpdate}, signal) {
   // Request 1: short greedy paths ("spines") with the top alternatives at each step. Each
   // alternative starts a branch, scored by its whole path's probability. Looking past the first
   // step matters when the typed text fixes the first token (e.g. typed " learning"): the choices
-  // then come from the step after. In parallel:
+  // then come from the step after. Two spines, in parallel:
+  // - healed: from the boundary, constrained to start with the typed text, for when it ends
+  //   mid-word. The constraint fixes the text, not its tokenization, so greedy can wander off the
+  //   usual tokenization: for "Used" it picks "Use" (heading for "Use deep learning…"), then
+  //   "deep" to supply the "d". Such paths get low scores, since logprobs are the model's raw
+  //   ones, from before the constraint (this needs a patched vLLM; stock vLLM reports them after
+  //   the grammar mask, which makes the wandering paths look certain).
   // - unhealed: from the end of the typed text, for when it ends at a token boundary ("Used" →
   //   " ethically"). Its prompt logprobs give the probability of the typed tokens, so its
-  //   branches' probabilities are of the whole path from the boundary.
-  // - boundary: just the top alternatives at the boundary, unconstrained. Those that cover the
-  //   typed text (" deep" for typed " de") are mid-word branches, with comparable probabilities.
-  // - healed: from the boundary, constrained to start with the typed text, to go deeper on the
-  //   mid-word branches. The server applies the constraint before computing logprobs, so the
-  //   steps it constrains report inflated probabilities; worse, greedy can wander off the usual
-  //   tokenization (for "Used" it picks "Use", then "deep" to supply the "d"). So use this spine
-  //   only if its first token covers the typed text, taking that token's probability from the
-  //   boundary request; the later steps are unconstrained.
+  //   branches' probabilities are also of the whole path from the boundary, and comparable.
+  // See experiments/token-healing for the alternatives we tried.
   const spineParams = {logprobs: 20, temperature: 0, logit_bias: logitBias, return_token_ids: true};
-  const [unhealedRes, boundaryRes, healedRes] = await Promise.all([
+  const [unhealedRes, healedRes] = await Promise.all([
     completions({prompt: prefix.text + draft, max_tokens: 3, prompt_logprobs: 1, ...spineParams}, signal),
-    typed && completions({prompt, max_tokens: 1, ...spineParams}, signal),
     typed && completions({prompt, max_tokens: 3 + Math.ceil(typed.length / 4), ...spineParams, ...startsWith(typed)}, signal),
   ]);
   const unhealed = unhealedRes.choices[0];
   // The draft's tokens are only for checking our pre-tokenizer split.
-  const baseIds = typed ? boundaryRes.choices[0].prompt_token_ids : unhealed.prompt_token_ids;
-  const warning = boundaryWarning(baseIds, unhealed.prompt_token_ids, base);
+  const baseIds = typed ? healedRes.choices[0].prompt_token_ids : unhealed.prompt_token_ids;
+  const warning = boundaryWarning(baseIds, unhealed.prompt_token_ids, base) ||
+    (!typed || healedRes.choices[0].text.startsWith(typed) ? "" : "The server ignored the constraint to continue the partial word, so predictions may be missing.");
   const typedLogprob = unhealed.prompt_token_ids.slice(baseIds.length)
     .reduce((sum, id, j) => sum + unhealed.prompt_logprobs[baseIds.length + j][String(id)].logprob, 0);
   let branches = spineBranches(unhealed.logprobs, typed, typed, typedLogprob);
-  if (typed) {
-    const boundary = boundaryRes.choices[0].logprobs.top_logprobs[0];
-    for (const [tok, logprob] of Object.entries(boundary)) {
-      if (tok.startsWith(typed) && tok.slice(typed.length).trim()) branches.push({forced: tok, prob: Math.exp(logprob)});
-    }
-    const {tokens, token_logprobs, top_logprobs} = healedRes.choices[0].logprobs;
-    if (tokens[0].startsWith(typed) && tokens[0] in boundary) {
-      branches.push(...spineBranches(
-        {tokens: tokens.slice(1), token_logprobs: token_logprobs.slice(1), top_logprobs: top_logprobs.slice(1)},
-        typed, tokens[0], boundary[tokens[0]]));
-    }
-  }
+  if (typed) branches.push(...spineBranches(healedRes.choices[0].logprobs, typed, "", 0));
   branches.sort((a, b) => b.prob - a.prob);
   // The spines overlap when the typed text is a whole token (e.g. " is").
   branches = branches.filter((b, i) => branches.findIndex(c => c.forced === b.forced) === i);

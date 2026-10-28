@@ -1,0 +1,13 @@
+[
+  {"draft": "", "want": "anything", "starts": ""},
+  {"draft": "Used", "want": "a new word (' ethically'), not 'Usedeep'", "starts": " "},
+  {"draft": "Use de", "want": "'ep' (deep), not 'pleting'", "starts": "ep"},
+  {"draft": "Use deep lear", "want": "'ning'", "starts": "ning"},
+  {"draft": "Deep learning is pow", "want": "'erful'", "starts": "erful"},
+  {"draft": "Deep learning techn", "want": "'olog…'", "starts": "olog"},
+  {"draft": "Deep neural net", "want": "'work(s)', not ' advancements'", "starts": "work"},
+  {"draft": "Deep learning is", "want": "a new word", "starts": " "},
+  {"draft": "Deep learning is a powerful technology, but we must use it resp", "want": "'onsibl…'", "starts": "onsibl"},
+  {"draft": "Deep learning advances are impressive but ethically questionab", "want": "'le' (the covering token ' questionable' isn't in the raw top 20)", "starts": "le"},
+  {"draft": "Deep learning technology is revolutionizi", "want": "'ng' (no single token covers it: ' revolution' + 'izing')", "starts": "ng"}
+]
