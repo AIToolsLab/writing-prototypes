@@ -81,7 +81,7 @@ async function tokenSuggestions({messages, words, onUpdate}, signal) {
   // If the draft ends partway through a token (e.g. "Use de" = "Use" + "Ġde", where "deep"
   // would be the single token "Ġdeep"), the model infers the word *isn't* one that has a longer
   // token, and predicts "depleting". So back up to the last pre-token boundary, which every
-  // tokenization of the full text shares, and constrain the output to start with the text we
+  // tokenization of the full text shares, and look for continuations that start with the text we
   // backed over. The model then picks its own tokenization (e.g. "Ġdeep").
   const {role, content: draft} = messages.at(-1);
   const [base, typed] = splitLastPretoken(draft);
@@ -89,37 +89,49 @@ async function tokenSuggestions({messages, words, onUpdate}, signal) {
   const [prefix, logitBias] = await Promise.all([turnPrefix(messages.slice(0, -1), role), noEndBias()]);
   const prompt = prefix.text + base;
 
-  // Request 1: a short greedy path ("spine") from the boundary, with the top alternatives at
-  // each step. Each alternative starts a branch, scored by its whole path's probability. Looking
-  // past the first step matters when the typed text fixes the first token (e.g. typed " learning"):
-  // the choices then come from the step after. Enough steps to cover the typed text, plus a few.
-  // The draft's tokens are only for checking our pre-tokenizer split; /tokenize uses no GPU time.
-  const [spineRes, draftTokens] = await Promise.all([completions({
-    prompt,
-    max_tokens: 3 + Math.ceil(typed.length / 4),
-    logprobs: 20,
-    temperature: 0,
-    logit_bias: logitBias,
-    return_token_ids: true,
-    ...(typed && startsWith(typed)),
-  }, signal), post("/tokenize", {model: MODEL, prompt: prefix.text + draft, add_special_tokens: false}, signal)]);
-  const spine = spineRes.choices[0];
-  const warning = boundaryWarning(spine.prompt_token_ids, draftTokens.tokens, base) ||
-    (spine.text.startsWith(typed) ? "" : "The server ignored the constraint to continue the partial word, so predictions may be missing.");
-  const {tokens, token_logprobs, top_logprobs} = spine.logprobs;
-  let branches = [];
-  let pathText = "", pathLogprob = 0;
-  for (let j = 0; j < tokens.length; j++) {
-    for (const [tok, logprob] of Object.entries(top_logprobs[j])) {
-      const forced = pathText + tok;
-      // Only branches that get past the typed text to something visible are suggestions.
-      if (isSpecialToken(tok) || !forced.startsWith(typed) || !forced.slice(typed.length).trim()) continue;
-      branches.push({forced, prob: Math.exp(pathLogprob + logprob)});
+  // Request 1: short greedy paths ("spines") with the top alternatives at each step. Each
+  // alternative starts a branch, scored by its whole path's probability. Looking past the first
+  // step matters when the typed text fixes the first token (e.g. typed " learning"): the choices
+  // then come from the step after. In parallel:
+  // - unhealed: from the end of the typed text, for when it ends at a token boundary ("Used" →
+  //   " ethically"). Its prompt logprobs give the probability of the typed tokens, so its
+  //   branches' probabilities are of the whole path from the boundary.
+  // - boundary: just the top alternatives at the boundary, unconstrained. Those that cover the
+  //   typed text (" deep" for typed " de") are mid-word branches, with comparable probabilities.
+  // - healed: from the boundary, constrained to start with the typed text, to go deeper on the
+  //   mid-word branches. The server applies the constraint before computing logprobs, so the
+  //   steps it constrains report inflated probabilities; worse, greedy can wander off the usual
+  //   tokenization (for "Used" it picks "Use", then "deep" to supply the "d"). So use this spine
+  //   only if its first token covers the typed text, taking that token's probability from the
+  //   boundary request; the later steps are unconstrained.
+  const spineParams = {logprobs: 20, temperature: 0, logit_bias: logitBias, return_token_ids: true};
+  const [unhealedRes, boundaryRes, healedRes] = await Promise.all([
+    completions({prompt: prefix.text + draft, max_tokens: 3, prompt_logprobs: 1, ...spineParams}, signal),
+    typed && completions({prompt, max_tokens: 1, ...spineParams}, signal),
+    typed && completions({prompt, max_tokens: 3 + Math.ceil(typed.length / 4), ...spineParams, ...startsWith(typed)}, signal),
+  ]);
+  const unhealed = unhealedRes.choices[0];
+  // The draft's tokens are only for checking our pre-tokenizer split.
+  const baseIds = typed ? boundaryRes.choices[0].prompt_token_ids : unhealed.prompt_token_ids;
+  const warning = boundaryWarning(baseIds, unhealed.prompt_token_ids, base);
+  const typedLogprob = unhealed.prompt_token_ids.slice(baseIds.length)
+    .reduce((sum, id, j) => sum + unhealed.prompt_logprobs[baseIds.length + j][String(id)].logprob, 0);
+  let branches = spineBranches(unhealed.logprobs, typed, typed, typedLogprob);
+  if (typed) {
+    const boundary = boundaryRes.choices[0].logprobs.top_logprobs[0];
+    for (const [tok, logprob] of Object.entries(boundary)) {
+      if (tok.startsWith(typed) && tok.slice(typed.length).trim()) branches.push({forced: tok, prob: Math.exp(logprob)});
     }
-    pathText += tokens[j];
-    pathLogprob += token_logprobs[j];
+    const {tokens, token_logprobs, top_logprobs} = healedRes.choices[0].logprobs;
+    if (tokens[0].startsWith(typed) && tokens[0] in boundary) {
+      branches.push(...spineBranches(
+        {tokens: tokens.slice(1), token_logprobs: token_logprobs.slice(1), top_logprobs: top_logprobs.slice(1)},
+        typed, tokens[0], boundary[tokens[0]]));
+    }
   }
   branches.sort((a, b) => b.prob - a.prob);
+  // The spines overlap when the typed text is a whole token (e.g. " is").
+  branches = branches.filter((b, i) => branches.findIndex(c => c.forced === b.forced) === i);
 
   // Branches that already contain the words we'll show are final; keep the most probable one per
   // shown text (e.g. " deep learning" and " deep neural" both show as "ep" after typed " de").
@@ -156,6 +168,23 @@ async function tokenSuggestions({messages, words, onUpdate}, signal) {
     }
   }
   return {suggestions: toSuggestions(), warning, status: `Predicted in ${Math.round(performance.now() - t0)} ms`};
+}
+
+// Branches off a spine: each top alternative at each step, appended to the spine's path so far
+// (which starts as pathText, with log-probability pathLogprob). Only branches that get past the
+// typed text to something visible are suggestions.
+function spineBranches({tokens, token_logprobs, top_logprobs}, typed, pathText, pathLogprob) {
+  const branches = [];
+  for (let j = 0; j < tokens.length; j++) {
+    for (const [tok, logprob] of Object.entries(top_logprobs[j])) {
+      const forced = pathText + tok;
+      if (isSpecialToken(tok) || !forced.startsWith(typed) || !forced.slice(typed.length).trim()) continue;
+      branches.push({forced, prob: Math.exp(pathLogprob + logprob)});
+    }
+    pathText += tokens[j];
+    pathLogprob += token_logprobs[j];
+  }
+  return branches;
 }
 
 // If our pre-tokenizer split matches the server's, the tokens of `base` are a prefix of the
