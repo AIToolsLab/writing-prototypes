@@ -1,17 +1,3 @@
----
-title: Writing Tools Prototypes
-emoji: 🏢
-colorFrom: yellow
-colorTo: yellow
-sdk: streamlit
-sdk_version: 1.36.0
-app_file: app.py
-pinned: false
-license: mit
----
-
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
-
 ## Static web version (`docs/`)
 
 A plain HTML/JS reimplementation that talks directly to a stock vLLM server (no custom inference code). One page (`docs/index.html`, UI in `app.js`) with two modes, Highlights and Predictive text. Predictive text defaults to rewriting a document, and can continue as a multi-turn conversation where you write both sides. Two interchangeable engines:
