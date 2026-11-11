@@ -4,6 +4,8 @@
 
 const structuredEngine = {
   name: "structured",
+  server: BASE_URL,
+  ready: once(loadModel),
   highlightDelay: 800,
   highlights: structuredHighlights,
   suggest: structuredSuggestions,

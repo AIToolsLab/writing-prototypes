@@ -8,6 +8,8 @@
 
 const tokensEngine = {
   name: "tokens",
+  server: BASE_URL,
+  ready: once(loadModel),
   highlightDelay: 150,
   highlights: tokenHighlights,
   suggest: tokenSuggestions,
