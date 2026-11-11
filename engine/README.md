@@ -21,7 +21,7 @@ GPU memory per sequence, which is what limits `--seqs`.
 
 ## Why it's fast
 
-One model context stays warm, holding the last prompt.
+One model context stays warm, with a cache for each writer.
 
 - **Reuse.** A request reuses the longest prefix it shares with the cached prompt and decodes only the rest.
 - **Checkpoints.** Models with recurrent state (Qwen3.5 and later) can't be rewound token by token. So we park
@@ -33,6 +33,37 @@ One model context stays warm, holding the last prompt.
 Measured 2026-11-11 on the 4090 (`experiments/token-healing/trie_check.mjs` and a typing simulation):
 50–200 ms per prediction, median 64 ms per keystroke at 700 tokens of context and 85 ms at 3,300. The vLLM path
 took about 2 s per keystroke at 900 tokens, because that model's prefix cache only reuses 1568-token blocks.
+
+## Several writers at once
+
+Each writer has a *session*: a main sequence and its checkpoints. Name it with `session` in the request (the
+page uses a random id per tab); unnamed requests are matched to the session whose text they continue.
+Requests still run one at a time on the GPU.
+
+What's scarce is sequences. The attention cache is one pool that all sequences share, but recurrent state costs
+about 150 MB per sequence, so with the default 24 sequences, 12 are for sessions and 12 for search branches.
+Sessions share theirs like this:
+
+- A lone writer gets a main sequence and up to 11 checkpoints.
+- As writers arrive, checkpoints are thinned, down to two each. A session keeps one checkpoint a little behind
+  the text, so backspacing a word or two stays cheap.
+- Beyond that (more than about four active writers, or documents that together overflow `--ctx`), the least
+  recently used session moves to host memory and comes back when its writer types again. So does any session
+  that has been idle for 32 requests.
+
+Measured 2026-11-11 with `bench/sessions_check.py`, writers taking turns one keystroke at a time:
+
+| Writers | Document | Median keystroke | Of which restoring from host memory |
+|---|---|---|---|
+| 3 | ~550 tokens | 82 ms | none needed |
+| 16 | ~550 tokens | 177 ms | 62 ms, on every keystroke |
+| 5 | ~4,400 tokens | 273 ms | 142 ms, on every keystroke |
+
+Taking strict turns is the worst case for the last two rows; real writers pause, and a session that's still in
+the GPU pays nothing. A restored session gives exactly the same probabilities as before it was moved out. It
+loses its checkpoints, so a jump far back right after restoring decodes the prompt again (about 1.6 s for 4,400 tokens).
+
+`GET /v1/sessions` lists the sessions and where they are.
 
 ## Why the probabilities are honest
 
@@ -50,9 +81,9 @@ in the second decimal of a logit, because the GPU computes different batch shape
 
 ## API
 
-All bodies are JSON. One writer at a time: requests share one cache and run one after another.
+All bodies are JSON. `session` is optional everywhere it appears; see above.
 
-**`POST /v1/continuations`** `{prompt, text, stop?, max_chars?, min_prob?, max_rounds?, max_batch?, branch?, max_depth?, time_ms?}`
+**`POST /v1/continuations`** `{session?, prompt, text, stop?, max_chars?, min_prob?, max_rounds?, max_batch?, branch?, max_depth?, time_ms?}`
 
 `prompt` is the templated context (special tokens are parsed); `text` is the draft so far. A continuation stops
 growing when it matches the `stop` regex, reaches `max_chars` characters or `max_depth` tokens, or ends the turn.
@@ -66,19 +97,19 @@ Branches under `min_prob` (default 0.01) aren't followed.
 
 Continuations are disjoint, so the probability that the text continues with some word is the sum over the
 continuations that start with it (a lower bound, since unlikely branches were dropped). A newer request
-supersedes older ones, which return 409.
+from the same session supersedes its older ones, which return 409.
 
-**`POST /v1/score`** `{prompt, text}` → for each token of `text`: its `logprob`, and the model's `top` choice
+**`POST /v1/score`** `{session?, prompt, text}` → for each token of `text`: its `logprob`, and the model's `top` choice
 there with `top_logprob`. Tokens that split a character are merged, so the `text` fields concatenate to `text`.
 
 **`POST /v1/template`** `{messages, add_generation_prompt?, enable_thinking?}` → `{prompt}`, using the model's
 chat template.
 
-`GET /health`, `GET /v1/models`.
+`GET /health`, `GET /v1/models`, `GET /v1/sessions`.
 
 ## Limits
 
-- One cache, so one writer at a time; a second writer would evict the first's cache on every request.
+- Requests run one at a time, so many people typing at once queue behind each other.
 - The settled-tokenization rule is a conservative stand-in for the tokenizer's own chunking rule, capped at 4
   tokens; a word of 5 or more tokens is conditioned on its last 4.
 - Scoring (highlights) decodes the whole document after an edit point, so it isn't faster than vLLM's.

@@ -13,9 +13,8 @@ codebase is fully ours to change.
 
 ## State as of this handoff
 
-- **Nothing from this work is committed.** `git status` shows the changes: `engine/` (new), `docs/engine-trie.js`
-  (new), `experiments/token-healing/trie_check.mjs` (new), edits to `docs/{app,llm,engine-tokens,engine-structured}.js`,
-  `docs/index.html`, `README.md`. Ask Ken before committing.
+- **Branch `writing-engine`**, one commit ahead of `main` (the engine, the Trie client, the docs). Per-writer
+  sessions were added after that commit; check `git status` to see whether they've been committed. Not pushed.
 - **The engine is running** on `127.0.0.1:52409` as a bare process (started by hand, won't survive a reboot),
   serving `/storage/HuggingFace/hub/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf`.
 - **vLLM is stopped** (`~/vllm-server`, Docker Compose, port 52408, public as vllm.thoughtful-ai.com). The two
@@ -23,7 +22,9 @@ codebase is fully ours to change.
   is fine; the public page's default "Tokens" engine is down while it's stopped. Swap back with
   `pkill -x writing-engine` then `docker compose start vllm` in `~/vllm-server`.
 - **Verified:** 11 of 11 token-healing cases (`node experiments/token-healing/trie_check.mjs`); typing latency
-  (`python3 engine/bench/typing_sim.py`); both page modes render results in headless Firefox.
+  (`python3 engine/bench/typing_sim.py`); several writers at once, including moving sessions to host memory and
+  back (`python3 engine/bench/sessions_check.py`); both page modes render results in headless Firefox (checked
+  before sessions were added, not since).
 - **Not verified:** the conversation view and accepting suggestions (click or Alt+digit) with the Trie engine.
 
 ## Task 1: Dockerize the engine
@@ -78,7 +79,7 @@ the first two, since the engine nearly supports them already.
 ### What the engine lacks for these (my assessment, untested)
 
 - **Comparing a fixed set of options** (moves, either/or): there is no endpoint for "score these N strings
-  after this prompt". Calling `/v1/score` N times would thrash the single cache. A `/v1/compare {prompt, options}`
+  after this prompt". Calling `/v1/score` N times would rewind and re-decode for each option. A `/v1/compare {prompt, options}`
   that forks one sequence per option would fit the existing design.
 - **Free generation** (generic draft, gist-back): the engine has none. Either add sampling, or use vLLM.
 - **Text after the cursor.** The model only reads left to right, so anything ahead of the cursor has to be
@@ -126,7 +127,8 @@ it could be deployed on campus.
 
 ## Known gaps in the engine
 
-- One cache, so one writer at a time. Per-session caches would need more sequences than the 27B leaves room for.
+- Requests run one at a time. Each writer has a session with its own cache (see `engine/README.md`), but a
+  session brought back from host memory has lost its checkpoints.
 - Highlights (`/v1/score`) re-decode everything after an edit: about 230 ms for 433 tokens and about 1.0 s for 2,161, once the prompt is cached.
 - The search tree is rebuilt on every keystroke. Keeping it between requests would cut the 2–5 search rounds
   on most keystrokes; the client's local narrowing hides most of this already.

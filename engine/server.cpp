@@ -3,7 +3,7 @@
 // What it's for: "given this context and the characters typed so far, what are the likely next
 // characters?", answered fast and with honest probabilities.
 //
-// - Fast: one model context stays warm. Each request reuses the longest cached prefix; "checkpoints"
+// - Fast: one model context stays warm, with a cache per writer. Each request reuses the longest cached prefix; "checkpoints"
 //   (parked sequence ids, which share memory with the main sequence) let us rewind to an earlier
 //   point even for models with recurrent state, which can't be rewound token by token. Search
 //   branches are forked sequences, which also share the prefix instead of copying it.
@@ -13,7 +13,7 @@
 //   nothing is renormalized over the candidates we happened to keep.
 //
 // Endpoints (JSON): GET /health, GET /v1/models, POST /v1/template, POST /v1/continuations, POST /v1/score.
-// One writer at a time: all requests share one cache and are serialized.
+// Requests run one at a time. Each writer ("session") has its own cache; see Engine for how they share the GPU.
 
 #include "llama.h"
 #include "chat.h"
@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <regex>
 #include <string>
@@ -92,6 +93,20 @@ struct Checkpoint {
     std::vector<float> logits;  // next-token logits at that point, if we have them
 };
 
+// One writer's cache: a main sequence holding `cur`, and checkpoints along it. A "cold" session has been moved
+// out of the GPU to make room (seq < 0); its state, if we kept it, is in `saved`.
+struct Session {
+    std::string id;
+    llama_seq_id seq = -1;
+    Tokens cur;
+    std::vector<float> cur_logits;               // next-token logits after `cur`; empty if unknown
+    std::vector<Checkpoint> checkpoints;         // sorted by len; each is a prefix of `cur`
+    std::string last_text; Tokens last_tokens; std::vector<size_t> last_offsets;  // last tokenization, to redo only the changed tail
+    std::vector<uint8_t> saved;
+    uint64_t last_used = 0;
+    bool automatic = false;                      // made for a request that didn't name a session
+};
+
 struct Engine {
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
@@ -109,22 +124,31 @@ struct Engine {
     std::unordered_map<std::string, Tokens> exact;  // piece → tokens
     llama_token bos = LLAMA_TOKEN_NULL;
 
-    // Cache: sequence 0 holds `cur`. Sequences 1..n_checkpoints are checkpoints; the rest are for forks.
-    // Sequences are scarce on models with recurrent state, which costs memory per distinct sequence
-    // (about 150 MB each for Qwen3.8-27B), unlike the attention cache, which sequences share.
-    int n_checkpoints = 0;
+    // Cache. Each session has a main sequence and some checkpoints; search branches borrow sequences for the
+    // length of one request. Sequences are the scarce thing on models with recurrent state, which costs memory
+    // per distinct sequence (about 150 MB each for Qwen3.8-27B); the attention cache is one pool that sequences
+    // share. So sessions compete for sequences: checkpoints are thinned first, and then the least recently
+    // used session is moved to host memory.
     static constexpr size_t CHUNK = 256;         // prefill chunk; a checkpoint is parked after each
     static constexpr size_t KEEP_RECENT = 4;
-    Tokens cur;
-    std::vector<float> cur_logits;               // next-token logits after `cur`; empty if unknown
-    std::vector<Checkpoint> checkpoints;         // sorted by len; each is a prefix of `cur`
-    std::vector<llama_seq_id> free_checkpoint_seqs, free_fork_seqs;
-
-    // Last tokenization, to retokenize only the changed tail.
-    std::string last_text; Tokens last_tokens; std::vector<size_t> last_offsets;
+    static constexpr size_t LAG = 48;
+    static constexpr uint64_t IDLE = 32;         // requests from others since a session's last one, after which it's idle
+    static constexpr size_t MAX_SESSIONS = 64;
+    static constexpr size_t MAX_COLD_BYTES = size_t(16) << 30;
+    int fork_reserve = 0;                        // sequences that sessions never take, kept for search branches
+    std::vector<llama_seq_id> free_seqs;
+    std::map<std::string, std::unique_ptr<Session>> sessions;
+    Session * s = nullptr;                       // the session of the request being handled
+    uint64_t clock = 0, auto_count = 0;
+    size_t cold_bytes = 0;
+    double restore_ms = 0;
 
     std::mutex mutex;
-    std::atomic<uint64_t> latest_request{0};
+    // A newer keystroke makes a writer's older requests pointless: they give up at their next check.
+    std::mutex latest_mutex;
+    std::map<std::string, uint64_t> latest;
+    uint64_t stamp(const std::string & key) { std::lock_guard<std::mutex> lock(latest_mutex); return ++latest[key]; }
+    bool is_latest(const std::string & key, uint64_t id) { std::lock_guard<std::mutex> lock(latest_mutex); return latest[key] == id; }
 
     void load(const std::string & path, int ctx_size, int n_gpu_layers, int seqs);
 
@@ -138,8 +162,15 @@ struct Engine {
     // Cache
     double decode(const std::vector<std::array<int, 3>> & items, const std::vector<char> & want_logits);
     void add_checkpoint(bool with_logits);
-    void drop_checkpoint(size_t i);
+    void drop_checkpoint(Session & x, size_t i);
+    void thin(Session & x);
     void reset_cache();
+    Session & use_session(const json & req, const std::string & text);
+    void make_room(size_t cells, int seqs);
+    void cool(Session & x);
+    void forget(Session & x);
+    llama_seq_id take_seq(bool for_checkpoint);
+    json list_sessions();
     struct SyncStats { size_t reused = 0, decoded = 0; double ms = 0, decode_ms = 0; };
     // on_chunk(positions, logits): logits[k] predicts the token after position positions[k].
     using ChunkFn = std::function<void(const std::vector<size_t> &, const std::vector<const float *> &)>;
@@ -171,9 +202,8 @@ void Engine::load(const std::string & path, int ctx_size, int n_gpu_layers, int 
     mem = llama_get_memory(ctx);
     n_ctx = llama_n_ctx(ctx);
     n_seq = seqs;
-    n_checkpoints = std::min(31, (seqs - 1) / 2 - 1);
-    for (int s = n_checkpoints; s >= 1; s--) free_checkpoint_seqs.push_back(s);
-    for (int s = seqs - 1; s > n_checkpoints; s--) free_fork_seqs.push_back(s);
+    fork_reserve = std::min(12, seqs / 2);
+    for (int i = seqs - 1; i >= 0; i--) free_seqs.push_back(i);
 
     templates = common_chat_templates_init(model, "");
 
@@ -219,12 +249,12 @@ size_t Engine::safe_restart(const Tokenized & t, size_t before_byte) const {
 
 Engine::Tokenized Engine::tokenize(const std::string & text) {
     Tokenized out;
-    size_t common = 0, max = std::min(text.size(), last_text.size());
-    while (common < max && text[common] == last_text[common]) common++;
-    size_t restart = safe_restart({last_tokens, last_offsets}, common);
-    size_t start_byte = restart ? last_offsets[restart] : 0;
-    out.tokens.assign(last_tokens.begin(), last_tokens.begin() + restart);
-    out.offsets.assign(last_offsets.begin(), last_offsets.begin() + restart);
+    size_t common = 0, max = std::min(text.size(), s->last_text.size());
+    while (common < max && text[common] == s->last_text[common]) common++;
+    size_t restart = safe_restart({s->last_tokens, s->last_offsets}, common);
+    size_t start_byte = restart ? s->last_offsets[restart] : 0;
+    out.tokens.assign(s->last_tokens.begin(), s->last_tokens.begin() + restart);
+    out.offsets.assign(s->last_offsets.begin(), s->last_offsets.begin() + restart);
     bool had_bos = restart == 0 && bos != LLAMA_TOKEN_NULL && !starts_with(text, rendered[bos]);
     if (had_bos) { out.tokens.push_back(bos); out.offsets.push_back(0); }
     size_t offset = start_byte;
@@ -234,7 +264,7 @@ Engine::Tokenized Engine::tokenize(const std::string & text) {
     }
     out.offsets.push_back(offset);
     if (offset != text.size()) throw HttpError{500, "this tokenizer doesn't round-trip text exactly, which the engine relies on"};
-    last_text = text; last_tokens = out.tokens; last_offsets = out.offsets;
+    s->last_text = text; s->last_tokens = out.tokens; s->last_offsets = out.offsets;
     return out;
 }
 
@@ -295,78 +325,222 @@ double Engine::decode(const std::vector<std::array<int, 3>> & items, const std::
     return now_ms() - t0;
 }
 
-void Engine::drop_checkpoint(size_t i) {
-    llama_memory_seq_rm(mem, checkpoints[i].seq, -1, -1);
-    free_checkpoint_seqs.push_back(checkpoints[i].seq);
-    checkpoints.erase(checkpoints.begin() + i);
+void Engine::drop_checkpoint(Session & x, size_t i) {
+    llama_memory_seq_rm(mem, x.checkpoints[i].seq, -1, -1);
+    free_seqs.push_back(x.checkpoints[i].seq);
+    x.checkpoints.erase(x.checkpoints.begin() + i);
+}
+
+// Give up one checkpoint: keep the first and the most recent ones if we can; of the rest, drop the one that
+// leaves the smallest gap.
+void Engine::thin(Session & x) {
+    size_t n = x.checkpoints.size();
+    if (n <= 2) { drop_checkpoint(x, 0); return; }
+    size_t last = n - 2 > KEEP_RECENT ? n - 1 - KEEP_RECENT : n - 2;   // the last interior index we may drop
+    size_t best = 1, best_gap = SIZE_MAX;
+    for (size_t i = 1; i <= last; i++) {
+        size_t gap = x.checkpoints[i + 1].len - x.checkpoints[i - 1].len;
+        if (gap < best_gap) { best_gap = gap; best = i; }
+    }
+    drop_checkpoint(x, best);
+}
+
+// A sequence for the current session's main sequence or for a new checkpoint (-1 if it can't have another
+// checkpoint). Sessions together hold at most n_seq - fork_reserve sequences. When they're all taken:
+// - a session that has been idle for a while is moved to host memory;
+// - otherwise the session with the most checkpoints gives one up, but each keeps two. With fewer, backspacing
+//   past a word means decoding the whole prompt again, which costs more than bringing a session back from
+//   host memory. So when every session is down to two, a new session pushes out the least recently used one.
+// A session with only two checkpoints replaces the older one only once the newer one trails the text by
+// LAG / 2 tokens, so there is always one a little way back to rewind to.
+llama_seq_id Engine::take_seq(bool for_checkpoint) {
+    for (;;) {
+        int held = 0;
+        Session * richest = nullptr, * oldest = nullptr;
+        for (auto & [id, x] : sessions) {
+            if (x->seq < 0) continue;
+            held += 1 + x->checkpoints.size();
+            if (!richest || x->checkpoints.size() > richest->checkpoints.size() ||
+                (x->checkpoints.size() == richest->checkpoints.size() && x->last_used < richest->last_used)) richest = x.get();
+            if (x.get() != s && (!oldest || x->last_used < oldest->last_used)) oldest = x.get();
+        }
+        if (held < n_seq - fork_reserve && !free_seqs.empty()) break;
+        size_t own = s->checkpoints.size(), most = richest ? richest->checkpoints.size() : 0;
+        size_t behind = own ? s->cur.size() - s->checkpoints.back().len : 0;
+        if (oldest && clock - oldest->last_used > IDLE) cool(*oldest);
+        else if (most > 2 && (!for_checkpoint || most > own)) thin(*richest);
+        else if (!for_checkpoint && oldest) cool(*oldest);
+        else if (!for_checkpoint) throw HttpError{500, "no sequence available"};
+        else if (own > 2) thin(*s);
+        else if (own == 2 && behind >= LAG / 2) drop_checkpoint(*s, 0);
+        else if (own == 1 && behind >= LAG) drop_checkpoint(*s, 0);
+        else return -1;
+    }
+    llama_seq_id seq = free_seqs.back(); free_seqs.pop_back();
+    return seq;
 }
 
 // Park a checkpoint at the end of `cur`.
 void Engine::add_checkpoint(bool with_logits) {
-    if (cur.empty()) return;
-    if (!checkpoints.empty() && checkpoints.back().len == cur.size()) {
-        if (with_logits) checkpoints.back().logits = cur_logits;
+    if (s->cur.empty()) return;
+    if (!s->checkpoints.empty() && s->checkpoints.back().len == s->cur.size()) {
+        if (with_logits) s->checkpoints.back().logits = s->cur_logits;
         return;
     }
-    if (free_checkpoint_seqs.empty()) {
-        // Thin out: keep the first and the most recent ones; of the rest, drop the one that leaves the smallest gap.
-        size_t best = 1, best_gap = SIZE_MAX;
-        for (size_t i = 1; i + KEEP_RECENT < checkpoints.size(); i++) {
-            size_t gap = checkpoints[i + 1].len - checkpoints[i - 1].len;
-            if (gap < best_gap) { best_gap = gap; best = i; }
-        }
-        drop_checkpoint(best);
-    }
-    llama_seq_id seq = free_checkpoint_seqs.back(); free_checkpoint_seqs.pop_back();
-    llama_memory_seq_cp(mem, 0, seq, -1, -1);
-    checkpoints.push_back({seq, cur.size(), with_logits ? cur_logits : std::vector<float>()});
+    llama_seq_id seq = take_seq(true);
+    if (seq < 0) return;
+    llama_memory_seq_cp(mem, s->seq, seq, -1, -1);
+    s->checkpoints.push_back({seq, s->cur.size(), with_logits ? s->cur_logits : std::vector<float>()});
 }
 
 void Engine::reset_cache() {
-    llama_memory_clear(mem, true);
-    for (auto & c : checkpoints) free_checkpoint_seqs.push_back(c.seq);
-    checkpoints.clear(); cur.clear(); cur_logits.clear();
+    while (!s->checkpoints.empty()) drop_checkpoint(*s, s->checkpoints.size() - 1);
+    llama_memory_seq_rm(mem, s->seq, -1, -1);
+    s->cur.clear(); s->cur_logits.clear();
 }
 
-// Make sequence 0 hold exactly `target`, with next-token logits in cur_logits, reusing what we can.
+// Move a session out of the GPU, keeping its state in host memory so it can come back without recomputing.
+// Its checkpoints are dropped.
+void Engine::cool(Session & x) {
+    if (x.seq < 0) return;
+    while (!x.checkpoints.empty()) drop_checkpoint(x, x.checkpoints.size() - 1);
+    size_t size = x.cur.empty() ? 0 : llama_state_seq_get_size_ext(ctx, x.seq, LLAMA_STATE_SEQ_FLAGS_NONE);
+    x.saved.resize(size);
+    if (size && llama_state_seq_get_data_ext(ctx, x.saved.data(), size, x.seq, LLAMA_STATE_SEQ_FLAGS_NONE) != size) x.saved.clear();
+    if (x.saved.empty()) { x.cur.clear(); x.cur_logits.clear(); }
+    cold_bytes += x.saved.size();
+    llama_memory_seq_rm(mem, x.seq, -1, -1);
+    free_seqs.push_back(x.seq);
+    x.seq = -1;
+    // Host memory isn't unlimited either: the longest-idle cold sessions lose their state.
+    while (cold_bytes > MAX_COLD_BYTES) {
+        Session * oldest = nullptr;
+        for (auto & [id, y] : sessions) if (!y->saved.empty() && (!oldest || y->last_used < oldest->last_used)) oldest = y.get();
+        if (!oldest) break;
+        cold_bytes -= oldest->saved.size();
+        oldest->saved = {}; oldest->cur.clear(); oldest->cur_logits.clear();
+    }
+}
+
+void Engine::forget(Session & x) {
+    while (!x.checkpoints.empty()) drop_checkpoint(x, x.checkpoints.size() - 1);
+    if (x.seq >= 0) { llama_memory_seq_rm(mem, x.seq, -1, -1); free_seqs.push_back(x.seq); }
+    cold_bytes -= x.saved.size();
+    sessions.erase(x.id);
+}
+
+// Make sure the attention cache has `cells` free for the current session and that search branches can get
+// `seqs` sequences, by moving the least recently used other sessions out of the GPU.
+void Engine::make_room(size_t cells, int seqs) {
+    for (;;) {
+        size_t used = 0;
+        Session * oldest = nullptr;
+        for (auto & [id, x] : sessions) {
+            if (x->seq < 0 || x.get() == s) continue;
+            used += x->cur.size();
+            if (!oldest || x->last_used < oldest->last_used) oldest = x.get();
+        }
+        if ((used + cells <= (size_t) n_ctx && (int) free_seqs.size() >= seqs) || !oldest) return;
+        if (used + cells <= (size_t) n_ctx && !oldest->checkpoints.empty()) thin(*oldest); else cool(*oldest);
+    }
+}
+
+// The session for this request: the one it names, or else the one whose last text it most plausibly continues.
+// Brings it back into the GPU if it was moved out.
+Session & Engine::use_session(const json & req, const std::string & text) {
+    std::string id = req.value("session", "");
+    Session * found = nullptr;
+    if (!id.empty()) {
+        auto it = sessions.find("id:" + id);
+        if (it != sessions.end()) found = it->second.get();
+        id = "id:" + id;
+    } else {
+        // Unnamed requests continue an unnamed session if they keep at least half of its text (or of their own).
+        size_t best = 0;
+        for (auto & [key, x] : sessions) {
+            if (!x->automatic) continue;
+            size_t common = 0, max = std::min(text.size(), x->last_text.size());
+            while (common < max && text[common] == x->last_text[common]) common++;
+            if (common > best && 2 * common >= max) { best = common; found = x.get(); }
+        }
+        if (!found) id = "auto:" + std::to_string(++auto_count);
+    }
+    if (!found) {
+        if (sessions.size() >= MAX_SESSIONS) {
+            Session * oldest = nullptr;
+            for (auto & [key, x] : sessions) if (!oldest || x->last_used < oldest->last_used) oldest = x.get();
+            forget(*oldest);
+        }
+        auto made = std::make_unique<Session>();
+        made->id = id; made->automatic = id.rfind("auto:", 0) == 0;
+        found = made.get();
+        sessions[id] = std::move(made);
+    }
+    s = found;
+    s->last_used = ++clock;
+    restore_ms = 0;
+    if (s->seq < 0) {
+        double t0 = now_ms();
+        make_room(s->cur.size() + CHUNK, 0);
+        s->seq = take_seq(false);
+        bool restored = !s->saved.empty() && llama_state_seq_set_data_ext(ctx, s->saved.data(), s->saved.size(), s->seq, LLAMA_STATE_SEQ_FLAGS_NONE) > 0;
+        cold_bytes -= s->saved.size();
+        s->saved = {};
+        if (!restored) { llama_memory_seq_rm(mem, s->seq, -1, -1); s->cur.clear(); s->cur_logits.clear(); }
+        else { add_checkpoint(true); restore_ms = now_ms() - t0; }
+    }
+    return *s;
+}
+
+json Engine::list_sessions() {
+    json list = json::array();
+    for (auto & [id, x] : sessions) list.push_back({
+        {"id", id}, {"tokens", x->cur.size()}, {"hot", x->seq >= 0}, {"checkpoints", x->checkpoints.size()},
+        {"saved_mb", x->saved.size() / 1048576.0}, {"age", clock - x->last_used},
+    });
+    return {{"sessions", list}, {"free_sequences", free_seqs.size()}, {"fork_reserve", fork_reserve}};
+}
+
+// Make the session's main sequence hold exactly `target`, with next-token logits in cur_logits, reusing what we can.
 // If on_chunk is given, it gets the logits at every decoded position i with i + 1 >= logits_from (except the
 // last position of the target); the caller arranges, by syncing to a shorter target first, that all of them
 // get decoded.
 Engine::SyncStats Engine::sync(const Tokens & target, const ChunkFn & on_chunk, size_t logits_from) {
     if (target.empty()) throw HttpError{400, "empty prompt"};
     if ((int) target.size() + 64 > n_ctx) throw HttpError{400, "prompt too long for the context (" + std::to_string(target.size()) + " tokens)"};
+    make_room(target.size() + CHUNK, fork_reserve / 2);
     SyncStats stats;
     double t0 = now_ms();
     size_t common = 0;
-    while (common < cur.size() && common < target.size() && cur[common] == target[common]) common++;
+    while (common < s->cur.size() && common < target.size() && s->cur[common] == target[common]) common++;
 
-    if (common == cur.size() && common == target.size() && !cur_logits.empty()) { stats.reused = common; return stats; }
-    if (common < cur.size() || common == target.size()) {
+    if (common == s->cur.size() && common == target.size() && !s->cur_logits.empty()) { stats.reused = common; return stats; }
+    if (common < s->cur.size() || common == target.size()) {
         // Rewind to the latest usable checkpoint. One at the very end of the target is only usable if it has logits.
         int pick = -1;
-        for (size_t i = 0; i < checkpoints.size(); i++) {
-            const auto & c = checkpoints[i];
+        for (size_t i = 0; i < s->checkpoints.size(); i++) {
+            const auto & c = s->checkpoints[i];
             if (c.len <= common && (c.len < target.size() || !c.logits.empty())) pick = i;
         }
         if (pick < 0) reset_cache();
         else {
-            for (size_t i = checkpoints.size(); i-- > 0;) if (checkpoints[i].len > common) drop_checkpoint(i);
-            const auto & c = checkpoints[pick];
-            llama_memory_seq_rm(mem, 0, -1, -1);
-            llama_memory_seq_cp(mem, c.seq, 0, -1, -1);
-            cur.resize(c.len);
-            cur_logits = c.logits;
+            for (size_t i = s->checkpoints.size(); i-- > 0;) if (s->checkpoints[i].len > common) drop_checkpoint(*s, i);
+            const auto & c = s->checkpoints[pick];
+            llama_memory_seq_rm(mem, s->seq, -1, -1);
+            llama_memory_seq_cp(mem, c.seq, s->seq, -1, -1);
+            s->cur.resize(c.len);
+            s->cur_logits = c.logits;
         }
     }
-    stats.reused = cur.size();
+    stats.reused = s->cur.size();
 
-    while (cur.size() < target.size()) {
-        size_t begin = cur.size();
+    while (s->cur.size() < target.size()) {
+        size_t begin = s->cur.size();
         size_t end = std::min(target.size(), (begin / CHUNK + 1) * CHUNK);
         std::vector<std::array<int, 3>> items;
         std::vector<char> want;
         for (size_t i = begin; i < end; i++) {
-            items.push_back({target[i], (int) i, 0});
+            items.push_back({target[i], (int) i, s->seq});
             want.push_back(i + 1 == end || (on_chunk && i + 1 >= logits_from));
         }
         stats.decode_ms += decode(items, want);
@@ -376,8 +550,8 @@ Engine::SyncStats Engine::sync(const Tokens & target, const ChunkFn & on_chunk, 
             on_chunk(positions, logits);
         }
         const float * last = llama_get_logits_ith(ctx, end - begin - 1);
-        cur.insert(cur.end(), target.begin() + begin, target.begin() + end);
-        cur_logits.assign(last, last + n_vocab);
+        s->cur.insert(s->cur.end(), target.begin() + begin, target.begin() + end);
+        s->cur_logits.assign(last, last + n_vocab);
         add_checkpoint(end == target.size());
     }
     stats.decoded = target.size() - stats.reused;
@@ -420,10 +594,12 @@ json Engine::continuations(const json & req, uint64_t id) {
         try { stop = std::regex(req["stop"].get<std::string>(), std::regex::ECMAScript | std::regex::optimize); }
         catch (const std::regex_error & e) { throw HttpError{400, std::string("bad stop regex: ") + e.what()}; }
     }
-    auto superseded = [&] { return latest_request.load() != id; };
+    std::string key = req.value("session", "");
+    auto superseded = [&] { return !is_latest(key, id); };
 
     double t0 = now_ms();
     std::string full = prompt + text;
+    use_session(req, full);
     Tokenized tokenized = tokenize(full);
     size_t n_settled = boundary(full, tokenized);
     // The characters to condition on. They never reach back into the prompt past a control token, but may
@@ -438,11 +614,10 @@ json Engine::continuations(const json & req, uint64_t id) {
 
     std::vector<Node> nodes;
     nodes.push_back({-1, LLAMA_TOKEN_NULL, 0.0, "", 0, 0, typed.empty()});
-    nodes[0].seq = 0;
+    nodes[0].seq = s->seq;
     double covered = 0;      // probability that the text continues past `typed` (or ends exactly there), found so far
     double unresolved = 0;   // probability of paths still inside `typed` that we haven't expanded
     if (typed.empty()) covered = 1;
-    std::vector<llama_seq_id> used_seqs;
 
     auto is_done = [&](const Node & n) {
         if (n.end) return true;
@@ -504,7 +679,7 @@ json Engine::continuations(const json & req, uint64_t id) {
         }
     };
     auto release = [&](Node & n) {
-        if (n.seq > 0) { llama_memory_seq_rm(mem, n.seq, -1, -1); free_fork_seqs.push_back(n.seq); }
+        if (n.parent >= 0 && n.seq >= 0) { llama_memory_seq_rm(mem, n.seq, -1, -1); free_seqs.push_back(n.seq); }
         n.seq = -1;
     };
     auto cleanup = [&] {
@@ -514,7 +689,7 @@ json Engine::continuations(const json & req, uint64_t id) {
     int rounds = 0;
     try {
         if (!typed.empty()) unresolved = 1;  // the root itself
-        apply(0, expand(nodes[0], cur_logits.data(), -INFINITY));
+        apply(0, expand(nodes[0], s->cur_logits.data(), -INFINITY));
 
         for (; rounds < max_rounds && now_ms() - t0 < time_ms; rounds++) {
             if (superseded()) throw Superseded{};
@@ -538,8 +713,8 @@ json Engine::continuations(const json & req, uint64_t id) {
                 Node & n = nodes[ni]; Node & p = nodes[n.parent];
                 if (p.pending == 1 && n.parent != 0) { n.seq = p.seq; p.seq = -1; }
                 else {
-                    if (free_fork_seqs.empty()) continue;
-                    n.seq = free_fork_seqs.back(); free_fork_seqs.pop_back();
+                    if (free_seqs.empty()) continue;
+                    n.seq = free_seqs.back(); free_seqs.pop_back();
                     llama_memory_seq_cp(mem, p.seq, n.seq, -1, -1);
                 }
                 p.pending--;
@@ -584,7 +759,7 @@ json Engine::continuations(const json & req, uint64_t id) {
         {"continuations", list},
         {"stats", {
             {"prompt_tokens", target.size()}, {"reused_tokens", sync_stats.reused}, {"decoded_tokens", sync_stats.decoded},
-            {"rounds", rounds}, {"nodes", nodes.size()},
+            {"rounds", rounds}, {"nodes", nodes.size()}, {"restore_ms", restore_ms},
             {"tokenize_ms", t_tokenize}, {"prefill_ms", sync_stats.ms}, {"search_ms", now_ms() - t1}, {"total_ms", now_ms() - t0},
         }},
     };
@@ -596,6 +771,7 @@ json Engine::continuations(const json & req, uint64_t id) {
 json Engine::score(const json & req) {
     std::string prompt = req.value("prompt", ""), text = req.value("text", "");
     double t0 = now_ms();
+    use_session(req, prompt + text);
     Tokenized t = tokenize(prompt + text);
     size_t first = 0;
     while (first < t.tokens.size() && t.offsets[first] < prompt.size()) first++;
@@ -616,7 +792,7 @@ json Engine::score(const json & req) {
         // Sync to just before the text, so that every text position gets decoded with logits.
         Tokens head(t.tokens.begin(), t.tokens.begin() + first);
         stats = sync(head);
-        score_logits(first - 1, cur_logits.data());
+        score_logits(first - 1, s->cur_logits.data());
         SyncStats rest = sync(t.tokens, [&](const std::vector<size_t> & positions, const std::vector<const float *> & logits) {
             double t1 = now_ms();
             parallel_for(positions.size(), [&](size_t k) { score_logits(positions[k], logits[k]); });
@@ -696,12 +872,12 @@ int main(int argc, char ** argv) {
     };
     auto handle = [&](const char * path, std::function<json(const json &, uint64_t)> fn, bool supersedes) {
         server.Post(path, [&, fn, supersedes](const httplib::Request & req, httplib::Response & res) {
-            // A newer keystroke makes older requests pointless: they give up at their next check.
-            uint64_t id = supersedes ? ++engine.latest_request : 0;
             try {
                 json body = json::parse(req.body);
+                std::string key = body.value("session", "");
+                uint64_t id = supersedes ? engine.stamp(key) : 0;
                 std::lock_guard<std::mutex> lock(engine.mutex);
-                if (supersedes && engine.latest_request.load() != id) throw Superseded{};
+                if (supersedes && !engine.is_latest(key, id)) throw Superseded{};
                 send(res, 200, fn(body, id));
             } catch (const Superseded &) { send(res, 409, {{"error", "superseded by a newer request"}});
             } catch (const HttpError & e) { send(res, e.status, {{"error", e.message}});
@@ -712,6 +888,10 @@ int main(int argc, char ** argv) {
     handle("/v1/score", [&](const json & b, uint64_t) { return engine.score(b); }, false);
     handle("/v1/template", [&](const json & b, uint64_t) { return engine.render_template(b); }, false);
     server.Get("/health", [&](const httplib::Request &, httplib::Response & res) { send(res, 200, {{"status", "ok"}}); });
+    server.Get("/v1/sessions", [&](const httplib::Request &, httplib::Response & res) {
+        std::lock_guard<std::mutex> lock(engine.mutex);
+        send(res, 200, engine.list_sessions());
+    });
     server.Get("/v1/models", [&](const httplib::Request &, httplib::Response & res) {
         send(res, 200, {{"object", "list"}, {"data", {{{"id", engine.alias}, {"object", "model"}, {"engine", "writing-engine"}}}}});
     });

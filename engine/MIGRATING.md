@@ -50,7 +50,7 @@ Result on one RTX 4090 with Qwen3.8-27B: 50–200 ms per prediction, and all 11 
 
 `prompt` is the templated context from `/v1/template`; `text` is what the writer has typed after it.
 
-**`POST /v1/continuations`** `{prompt, text, stop}` where `stop` is a regex saying when a continuation is long
+**`POST /v1/continuations`** `{session, prompt, text, stop}` where `stop` is a regex saying when a continuation is long
 enough, e.g. `^\s*\S+(?=\s)` for one word.
 
 ```json
@@ -66,9 +66,9 @@ enough, e.g. `^\s*\S+(?=\s)` for one word.
   "works" followed by a space.
 - `end: true` means the model would end the message after that text.
 - For scripts without spaces, also send `max_chars` and cut units with `Intl.Segmenter`.
-- A newer request supersedes older ones, which return 409; treat that like an abort.
+- A newer request from the same session supersedes its older ones, which return 409; treat that like an abort.
 
-**`POST /v1/score`** `{prompt, text}` → `{tokens: [{text, logprob, top, top_logprob}]}`. One item per token of
+**`POST /v1/score`** `{session, prompt, text}` → `{tokens: [{text, logprob, top, top_logprob}]}`. One item per token of
 `text`: how likely it was, and what the model expected most there. The `text` fields concatenate to the input.
 
 **`POST /v1/template`** `{messages, add_generation_prompt}` → `{prompt}`. For a turn with no generation prompt
@@ -76,7 +76,8 @@ enough, e.g. `^\s*\S+(?=\s)` for one word.
 
 ## Things to know
 
-- **One writer at a time.** There is one cache. Two people typing at once will each evict the other's.
+- **Send a `session` id** (any string, one per writer or tab) with `/v1/continuations` and `/v1/score`. Each
+  session gets its own cache, so several people can write at once. Without it the server guesses by matching text.
 - **It can't share the GPU with vLLM** on the 4090; one or the other runs.
 - **Order prompts so the changing part is last.** Anything before an edit is reused; everything after is recomputed.
 - **Send requests as `Content-Type: text/plain`** from a browser, to skip the CORS preflight on every keystroke.

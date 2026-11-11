@@ -10,6 +10,9 @@
 
 const ENGINE_URL = new URLSearchParams(location.search).get("engine-server") || "http://localhost:52409";
 
+// Names this page's cache on the server, so several people can write at once without sharing one.
+const SESSION = globalThis.crypto?.randomUUID?.() ?? String(Math.random()).slice(2);
+
 const trieEngine = {
   name: "trie",
   server: ENGINE_URL,
@@ -52,7 +55,7 @@ function triePrefix(history, role) {
 async function trieHighlights({instruction, doc}, signal) {
   const t0 = performance.now();
   const prompt = await triePrefix(taskMessages(instruction, doc), "assistant");
-  const {tokens, stats} = await enginePost("/v1/score", {prompt, text: doc}, signal);
+  const {tokens, stats} = await enginePost("/v1/score", {session: SESSION, prompt, text: doc}, signal);
   const ranges = [];
   let pos = 0;
   for (const {text, logprob, top, top_logprob} of tokens) {
@@ -138,7 +141,7 @@ async function trieSuggestions({messages, words, onUpdate}, signal) {
     if (local.length) onUpdate(local);
   }
 
-  const body = {prompt, text: draft, stop: `^\\s*\\S+(?:[ \\t]+\\S+){${words - 1}}(?=\\s)`};
+  const body = {session: SESSION, prompt, text: draft, stop: `^\\s*\\S+(?:[ \\t]+\\S+){${words - 1}}(?=\\s)`};
   if (NO_SPACE_SCRIPT.test((messages.map(m => m.content).join("\n")).slice(-200))) body.max_chars = 4 * words + 2;
   const res = await enginePost("/v1/continuations", body, signal);
   lastAnswer = {prompt, words, draft, continuations: res.continuations};
