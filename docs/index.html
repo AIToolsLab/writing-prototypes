@@ -13,11 +13,12 @@
     <button role="tab" data-mode="highlights">🖍️ Highlights</button>
     <button role="tab" data-mode="predict">📝 Predictive text</button>
   </nav>
-  <label class="inline engine" title="How we get the model's opinion. Tokens reads next-token probabilities directly; Structured asks the model, via chat, to describe edits or suggestions as JSON.">
+  <label class="inline engine" title="How we get the model's opinion. Tokens reads next-token probabilities from a vLLM server; Structured asks the model, via chat, to describe edits or suggestions as JSON; Trie asks our own inference server (engine/), which is faster and conditions on the characters you typed.">
     Engine
     <select id="engine">
       <option value="tokens">Tokens</option>
       <option value="structured">Structured</option>
+      <option value="trie">Trie (our engine)</option>
     </select>
     <span id="engine-note" class="hint"></span>
   </label>
@@ -100,7 +101,7 @@
 <footer>
   <p>by <a href="https://kenarnold.org">Ken Arnold</a> and the <a href="https://thoughtful-ai.com/">Thoughtful AI Tools Lab</a> at Calvin University.
   This page sends your text to <code id="server"></code>, which may log requests; don't use sensitive information.
-  Add <code>?server=https://your-vllm-host</code> to the URL to use a different vLLM server.</p>
+  Add <code>?server=https://your-vllm-host</code> to the URL to use a different vLLM server, or <code>?engine-server=…</code> for a different Trie engine server.</p>
 </footer>
 
 <div id="tooltip" hidden></div>
@@ -108,6 +109,7 @@
 <script src="llm.js"></script>
 <script src="engine-tokens.js"></script>
 <script src="engine-structured.js"></script>
+<script src="engine-trie.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

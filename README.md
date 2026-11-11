@@ -7,4 +7,6 @@ A plain HTML/JS reimplementation that talks directly to a stock vLLM server (no 
 
 To avoid the chat template trimming whitespace, the response text never goes through the template: we render the chat prefix once (`/tokenize` with `add_generation_prompt`, then `/detokenize`), cache it, and send `prefix + response` as a text prompt. vLLM parses the special-token strings in it, giving the same token ids as tokenizing the two parts separately.
 
+A third engine, `engine-trie.js` (pick "Trie" on the page, or `#engine=trie`), talks to our own inference server in [`engine/`](engine/README.md) instead of vLLM. It is much faster for predictive text (about 50–200 ms per prediction, against about 2 s) and conditions on the characters typed rather than their tokens, so it needs no token healing.
+
 Run locally with `cd docs && python3 -m http.server`, then open http://localhost:8000. Add `?server=https://your-vllm-host` to the URL to use a different server.

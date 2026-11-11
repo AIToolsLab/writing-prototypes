@@ -5,7 +5,7 @@ const $ = id => document.getElementById(id);
 const ALT_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌥" : "Alt+";
 const SEND_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘↵" : "Ctrl+↵";
 
-const ENGINES = {tokens: tokensEngine, structured: structuredEngine};
+const ENGINES = {tokens: tokensEngine, structured: structuredEngine, trie: trieEngine};
 
 const REWRITE_ADJECTIVES = [
   "clear and concise", "more detailed and engaging", "more formal and professional",
@@ -32,10 +32,11 @@ const state = {
   suggestions: {draft: null, items: []},
 };
 
-// Conversation view always uses the tokens engine: the structured prompts are written for
-// one request and one response.
+// The structured prompts are written for one request and one response, so in conversation view
+// the tokens engine stands in for the structured one.
 function engine() {
-  return state.mode === "predict" && state.view === "chat" ? tokensEngine : ENGINES[state.engine];
+  const chatting = state.mode === "predict" && state.view === "chat";
+  return chatting && state.engine === "structured" ? tokensEngine : ENGINES[state.engine];
 }
 
 function setText(id, text) {
@@ -74,9 +75,8 @@ function layout() {
   $("doc-editor").classList.toggle("plain", !highlighting);
   $(chatting ? "predict-slot-chat" : "predict-slot-rewrite").append($("predict-panel"));
 
-  $("engine").value = engine().name;
-  $("engine").disabled = chatting;
-  setText("engine-note", chatting ? "(conversations use Tokens)" : "");
+  setText("engine-note", engine().name !== state.engine ? "(conversations use Tokens)" : "");
+  setText("server", engine().server);
   hideTooltip();
   writeHash();
   for (const ta of document.querySelectorAll("textarea.editor")) autogrow(ta);
@@ -141,7 +141,7 @@ const updateHighlights = updater({
 
 const updateSuggestions = updater({
   key: () => JSON.stringify([engine().name, currentMessages(), $("words").value]),
-  delay: () => 150,
+  delay: () => engine().suggestDelay ?? 150,
   statusId: "predict-status",
   run: async signal => {
     const messages = currentMessages();
@@ -158,11 +158,17 @@ const updateSuggestions = updater({
   },
 });
 
-// Only the visible mode makes requests.
+// Only the visible mode makes requests, once its engine's server has answered.
 function update() {
-  if (!MODEL) return;
-  if (state.mode === "highlights") updateHighlights();
-  else updateSuggestions();
+  const current = engine();
+  current.ready().then(() => {
+    if (current !== engine()) return;
+    if (state.mode === "highlights") updateHighlights();
+    else updateSuggestions();
+  }, err => {
+    if (current !== engine()) return;
+    setText(state.mode === "highlights" ? "highlights-status" : "predict-status", `Error: can't reach ${current.server} (${err.message})`);
+  });
 }
 
 // ── Prompt picker ──────────────────────────────────────────────────────────
@@ -470,13 +476,9 @@ document.addEventListener("keydown", e => {
 
 readHash();
 buildPromptPicker();
-setText("server", BASE_URL);
 setText("keys-hint", `${ALT_KEY}1–${ALT_KEY}${NUM_SUGGESTIONS} picks a suggestion`);
 setText("send-key", SEND_KEY);
 setInstruction(state.instruction);
+$("engine").value = state.engine;
 layout();
 renderChat();
-loadModel().then(update, err => {
-  setText("highlights-status", "Error: " + err.message);
-  setText("predict-status", "Error: " + err.message);
-});

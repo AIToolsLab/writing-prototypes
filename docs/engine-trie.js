@@ -1,0 +1,152 @@
+// Trie engine: talks to our own inference server (engine/server.cpp) instead of vLLM.
+//
+// The server answers in characters, not tokens: given the prompt and the draft, it returns likely
+// continuations with the model's probability of each, conditioned on the draft's *characters*
+// (summed over the ways they could be tokenized). So there's no token healing here. This file
+// only groups those continuations into the units we show (words), and narrows the last answer
+// locally while the next one is on its way.
+//
+// Same interface as engine-tokens.js; uses a few helpers from llm.js and engine-tokens.js.
+
+const ENGINE_URL = new URLSearchParams(location.search).get("engine-server") || "http://localhost:52409";
+
+const trieEngine = {
+  name: "trie",
+  server: ENGINE_URL,
+  highlightDelay: 150,
+  suggestDelay: 0,  // the server drops requests that a newer one supersedes
+  ready: once(async () => {
+    const res = await fetch(ENGINE_URL + "/v1/models");
+    if (!res.ok) throw new Error(`Listing models failed: ${res.status}`);
+  }),
+  highlights: trieHighlights,
+  suggest: trieSuggestions,
+};
+
+async function enginePost(path, body, signal) {
+  const res = await fetch(ENGINE_URL + path, {
+    method: "POST",
+    headers: {"Content-Type": "text/plain"},  // a "simple" request, so no CORS preflight per keystroke
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (res.status === 409) throw new DOMException("superseded", "AbortError");
+  if (!res.ok) throw new Error(`${path}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
+// The chat-templated prompt up to where `role`'s message starts, after `history`.
+function triePrefix(history, role) {
+  return cached(JSON.stringify(["trie", role, history]), async () => {
+    if (role === "assistant") return (await enginePost("/v1/template", {messages: history, add_generation_prompt: true})).prompt;
+    // There's no generation prompt for a user turn, so render the turn with a placeholder and cut there.
+    const {prompt} = await enginePost("/v1/template", {messages: [...history, {role, content: PLACEHOLDER}], add_generation_prompt: false});
+    const cut = prompt.lastIndexOf(PLACEHOLDER);
+    if (cut === -1) throw new Error("Couldn't find the start of the message in the chat template");
+    return prompt.slice(0, cut);
+  });
+}
+
+// ── Highlights ─────────────────────────────────────────────────────────────
+
+async function trieHighlights({instruction, doc}, signal) {
+  const t0 = performance.now();
+  const prompt = await triePrefix(taskMessages(instruction, doc), "assistant");
+  const {tokens, stats} = await enginePost("/v1/score", {prompt, text: doc}, signal);
+  const ranges = [];
+  let pos = 0;
+  for (const {text, logprob, top, top_logprob} of tokens) {
+    const start = pos;
+    pos += text.length;
+    const gap = top_logprob - logprob;  // 0 when the document's token was the model's top choice
+    if (gap <= 0) continue;
+    const lead = text.length - text.trimStart().length;
+    const ratio = Math.exp(gap);
+    ranges.push({
+      start: lead < text.length ? start + lead : start,
+      end: pos,
+      alternative: top,
+      score: gap,
+      detail: `${ratio < 10 ? ratio.toFixed(1) : Math.round(ratio)}× more likely`,
+    });
+  }
+  const warning = pos === doc.length ? "" : "The scored text doesn't line up with the document, so highlights may be misplaced.";
+  return {ranges, warning, status: `Scored ${stats.text_tokens} tokens in ${Math.round(performance.now() - t0)} ms`};
+}
+
+// ── Predictions ────────────────────────────────────────────────────────────
+
+// Scripts written without spaces between words. For these we find words with the browser's
+// segmenter, and ask the server for a few characters rather than "up to the next space".
+const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+const segmenter = typeof Intl !== "undefined" && Intl.Segmenter ? new Intl.Segmenter(undefined, {granularity: "word"}) : null;
+
+// The first n words of a continuation, and whether we've seen enough text after them to know they're whole.
+function firstUnits(text, n) {
+  if (!segmenter || !NO_SPACE_SCRIPT.test(text)) {
+    const whole = completeWords(text, n);
+    return whole === null ? {text: firstWords(text, n), complete: false} : {text: whole, complete: true};
+  }
+  // A unit is a word plus any punctuation after it; it ends at whitespace or where the next word starts.
+  const segments = [...segmenter.segment(text)];
+  let count = 0, end = 0, i = 0;
+  for (; i < segments.length; i++) {
+    const {segment, isWordLike} = segments[i];
+    if (count === n && (isWordLike || /\s/.test(segment))) break;
+    if (isWordLike) count++;
+    end = segments[i].index + segment.length;
+  }
+  // The last segment may be a word that's still growing, so it doesn't confirm that the unit ended.
+  const complete = count === n && (i < segments.length - 1 || (i < segments.length && /\s/.test(segments[i].segment)));
+  return {text: text.slice(0, end), complete};
+}
+
+// Group continuations by the unit they start with, adding up their probabilities. A unit's total is
+// a lower bound: continuations the server didn't follow (too unlikely) aren't counted.
+function unitSuggestions(continuations, words) {
+  const units = new Map();
+  for (const {text, prob} of continuations) {
+    const unit = firstUnits(text, words);
+    if (!unit.text.trim()) continue;  // ending the message here isn't a suggestion
+    units.set(unit.text, (units.get(unit.text) ?? 0) + prob);
+  }
+  // Under half a percent is noise: mostly words the server stopped following partway.
+  return [...units].map(([text, prob]) => ({text, prob})).filter(u => u.prob >= 0.005)
+    .sort((a, b) => b.prob - a.prob).slice(0, NUM_SUGGESTIONS);
+}
+
+// The continuations that are still possible after typing `extra` more characters. Their new
+// probabilities are lower bounds: continuations we never saw might match `extra` too.
+function narrow({continuations}, extra) {
+  const matching = continuations.filter(c => c.text.length > extra.length && c.text.startsWith(extra));
+  const seen = continuations.reduce((sum, c) => sum + c.prob, 0);
+  const total = matching.reduce((sum, c) => sum + c.prob, 0) + Math.max(0, 1 - seen);
+  return matching.map(c => ({...c, text: c.text.slice(extra.length), prob: c.prob / total}));
+}
+
+let lastAnswer = null;  // {prompt, words, draft, continuations}
+
+async function trieSuggestions({messages, words, onUpdate}, signal) {
+  const {role, content: draft} = messages.at(-1);
+  const t0 = performance.now();
+  const prompt = await triePrefix(messages.slice(0, -1), role);
+
+  // Until the server answers, show what the last answer implies for the characters typed since.
+  const last = lastAnswer;
+  if (last && last.prompt === prompt && last.words === words && draft.length > last.draft.length && draft.startsWith(last.draft)) {
+    const local = unitSuggestions(narrow(last, draft.slice(last.draft.length)), words);
+    if (local.length) onUpdate(local);
+  }
+
+  const body = {prompt, text: draft, stop: `^\\s*\\S+(?:[ \\t]+\\S+){${words - 1}}(?=\\s)`};
+  if (NO_SPACE_SCRIPT.test((messages.map(m => m.content).join("\n")).slice(-200))) body.max_chars = 4 * words + 2;
+  const res = await enginePost("/v1/continuations", body, signal);
+  lastAnswer = {prompt, words, draft, continuations: res.continuations};
+  const {stats} = res;
+  return {
+    suggestions: unitSuggestions(res.continuations, words),
+    warning: res.unresolved > 0.05 ? "Some ways of reading the last word weren't explored, so probabilities may be a little high." : "",
+    status: `Predicted in ${Math.round(performance.now() - t0)} ms ` +
+      `(server ${Math.round(stats.total_ms)} ms: ${stats.decoded_tokens} new tokens, ${stats.rounds} search steps)`,
+  };
+}

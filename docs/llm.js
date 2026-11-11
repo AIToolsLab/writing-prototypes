@@ -27,6 +27,12 @@ async function loadModel() {
   return MODEL;
 }
 
+// Wrap an async function so it runs once; a failure is forgotten, so the next call retries.
+function once(fn) {
+  let promise = null;
+  return () => promise ??= fn().catch(err => { promise = null; throw err; });
+}
+
 // A few recent results of `fn`, keyed by `key`. Not tied to any one caller's AbortSignal,
 // since results are shared; failed results are dropped so the next call retries.
 const prefixCache = new Map();
