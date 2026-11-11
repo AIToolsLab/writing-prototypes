@@ -1,5 +1,6 @@
-// The page: two modes (highlights, predictive text) over one engine at a time.
+// The page: three modes (highlights, predictive text, draft) over one engine at a time.
 // Predictive text has two views of the same thing: a one-turn rewrite, and a conversation.
+// Draft mode's own parts are in draft.js.
 
 const $ = id => document.getElementById(id);
 const ALT_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌥" : "Alt+";
@@ -22,7 +23,7 @@ const GENERATE_PROMPTS = [
 ];
 
 const state = {
-  mode: "highlights",  // or "predict"
+  mode: "highlights",  // or "predict", or "draft"
   view: "rewrite",     // or "chat"; only for predict mode
   engine: "tokens",
   instruction: "Rewrite this document to be clear and concise.",
@@ -35,10 +36,10 @@ const state = {
 };
 
 // The structured prompts are written for one request and one response, so in conversation view
-// the tokens engine stands in for the structured one.
+// the tokens engine stands in for the structured one. Draft mode needs probabilities, so it does too.
 function engine() {
   const chatting = state.mode === "predict" && state.view === "chat";
-  return chatting && state.engine === "structured" ? tokensEngine : ENGINES[state.engine];
+  return (chatting || state.mode === "draft") && state.engine === "structured" ? tokensEngine : ENGINES[state.engine];
 }
 
 function setText(id, text) {
@@ -49,7 +50,7 @@ function setText(id, text) {
 
 function readHash() {
   const params = new URLSearchParams(location.hash.slice(1));
-  if (["highlights", "predict"].includes(params.get("mode"))) state.mode = params.get("mode");
+  if (["highlights", "predict", "draft"].includes(params.get("mode"))) state.mode = params.get("mode");
   if (["rewrite", "chat"].includes(params.get("view"))) state.view = params.get("view");
   const name = ENGINE_ALIASES[params.get("engine")] ?? params.get("engine");
   if (name in ENGINES) state.engine = name;
@@ -63,22 +64,24 @@ function writeHash() {
 
 function layout() {
   const highlighting = state.mode === "highlights";
-  const chatting = !highlighting && state.view === "chat";
+  const drafting = state.mode === "draft";
+  const chatting = state.mode === "predict" && state.view === "chat";
   for (const tab of document.querySelectorAll(".tabs button")) {
     tab.setAttribute("aria-selected", tab.dataset.mode === state.mode);
   }
   $("highlights-view").hidden = !highlighting;
-  $("rewrite-view").hidden = highlighting || chatting;
+  $("rewrite-view").hidden = state.mode !== "predict" || chatting;
   $("chat-view").hidden = !chatting;
-  $("prompt-section").hidden = chatting;
-  document.body.classList.toggle("mode-predict", !highlighting);
+  $("draft-view").hidden = !drafting;
+  $("prompt-section").hidden = chatting || drafting;
+  document.body.classList.toggle("mode-predict", state.mode === "predict");
 
   // One document editor and one suggestions panel, moved to wherever they're needed.
   $(highlighting ? "doc-slot-highlights" : "doc-slot-rewrite").append($("doc-editor"));
   $("doc-editor").classList.toggle("plain", !highlighting);
-  $(chatting ? "predict-slot-chat" : "predict-slot-rewrite").append($("predict-panel"));
+  $(drafting ? "predict-slot-draft" : chatting ? "predict-slot-chat" : "predict-slot-rewrite").append($("predict-panel"));
 
-  setText("engine-note", engine().name !== state.engine ? "(conversations use Tokens)" : "");
+  setText("engine-note", engine().name === state.engine ? "" : drafting ? "(drafts use Tokens)" : "(conversations use Tokens)");
   setText("server", engine().server);
   $("chat-settings").hidden = state.engine !== "structured";
   hideTooltip();
@@ -169,6 +172,7 @@ function update() {
     if (current !== engine()) return;
     if (state.mode === "highlights") updateHighlights();
     else updateSuggestions();
+    if (state.mode === "draft") updateDraftAids();
   }, err => {
     if (current !== engine()) return;
     setText(state.mode === "highlights" ? "highlights-status" : "predict-status", `Error: can't use ${current.server}: ${err.message}`);
@@ -296,9 +300,12 @@ function showTooltip(rect, range) {
   detail.className = "detail";
   detail.textContent = range.detail ?? "";
   tooltip.append(alt, detail);
-  tooltip.style.left = `${rect.left + rect.width / 2}px`;
   tooltip.style.top = `${rect.top}px`;
   tooltip.hidden = false;
+  // Centered over the word, but kept on the page.
+  const half = tooltip.offsetWidth / 2 + 4;
+  const center = rect.left + rect.width / 2;
+  tooltip.style.left = `${Math.max(half, Math.min(center, document.documentElement.clientWidth - half))}px`;
 }
 
 function hideTooltip() {
@@ -308,11 +315,12 @@ function hideTooltip() {
 // ── Predictions ────────────────────────────────────────────────────────────
 
 function activeDraft() {
-  return state.view === "chat" ? $("chat-draft") : $("draft");
+  return state.mode === "draft" ? $("compose") : state.view === "chat" ? $("chat-draft") : $("draft");
 }
 
 // The conversation so far, ending with the message being written.
 function currentMessages() {
+  if (state.mode === "draft") return draftMessages();
   if (state.view === "chat") return state.chat;
   return [...taskMessages(state.instruction, $("doc").value), {role: "assistant", content: $("draft").value}];
 }
@@ -508,7 +516,7 @@ $("to-rewrite").addEventListener("click", e => { e.preventDefault(); state.view 
 // Alt+1–5 picks a suggestion. Use the key's position (code), since on a Mac Option+1 types "¡".
 document.addEventListener("keydown", e => {
   const match = e.code.match(/^Digit([1-9])$/);
-  if (state.mode !== "predict" || !match || !e.altKey || e.ctrlKey || e.metaKey) return;
+  if (state.mode === "highlights" || !match || !e.altKey || e.ctrlKey || e.metaKey) return;
   e.preventDefault();
   acceptSuggestion(+match[1] - 1);
 });
@@ -520,6 +528,7 @@ setText("send-key", SEND_KEY);
 setInstruction(state.instruction);
 $("engine").value = state.engine;
 chatSetup();
+initDraft();
 if (state.engine === "structured") refreshChatModels();
 layout();
 renderChat();

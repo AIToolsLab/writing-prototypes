@@ -219,6 +219,40 @@ body:not(.mode-predict) .predict-only { display: none; }
 #suggestions button small { flex-shrink: 0; color: #888; font-size: 0.75rem; }
 #suggestions button kbd { flex-shrink: 0; }
 
+/* ── Draft ── */
+
+.editor.short { min-height: 0; }
+.overlay-editor.snug .editor, .overlay-editor.snug .backdrop { line-height: 1.6; }
+
+/* The pencil stub: gray and italic, like a note in the margin; darker once it's in effect. */
+#stub-row { display: flex; align-items: baseline; gap: 0.5rem; margin-top: 0.5rem; color: #888; }
+#stub-row .pencil { font-size: 1.1rem; }
+#stub {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-style: italic;
+  color: #777;
+  border: none;
+  border-bottom: 1px dashed #bbb;
+  padding: 0.2rem 0.1rem;
+  background: none;
+}
+#stub:focus { outline: none; border-bottom-color: var(--accent); }
+#stub-row.active #stub { color: #444; border-bottom-style: solid; }
+#stub-row.active .pencil { color: var(--accent); }
+
+#moves-row { margin-top: 1rem; }
+#moves-ask { font: inherit; font-size: 0.9rem; padding: 0.2rem 0.7rem; margin-right: 0.5rem; cursor: pointer; }
+#moves { margin-top: 0.5rem; }
+#moves.stale { opacity: 0.5; }
+#moves button small { margin-left: 0.4rem; color: #888; font-size: 0.75rem; }
+
+/* Mirror shading. Like marks, no padding or borders: they'd shift the text. */
+.backdrop .expected, .swatch.expected { background: #e4e7ea; border-radius: 2px; }
+.backdrop .surprise, .swatch.surprise { background: #ffe9c7; box-shadow: inset 0 -2px #f5a623; border-radius: 2px; }
+.swatch { color: #444; padding: 0 3px; }
+
 /* ── Conversation ── */
 
 .chat-head { display: flex; justify-content: space-between; align-items: center; }

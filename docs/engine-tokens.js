@@ -29,6 +29,11 @@ const tokensEngine = {
   }),
   highlights: tokenHighlights,
   suggest: tokenSuggestions,
+  // Only this engine has these two (draft mode):
+  //   moves({assignment, draft}, signal) → {moves: [{text, prob}], status}
+  //   mirror({assignment, draft}, signal) → {words: [{start, end, prob, alternative}], status, warning?}
+  moves: tokenMoves,
+  mirror: tokenMirror,
 };
 
 async function enginePost(path, body, signal) {
@@ -159,5 +164,73 @@ async function tokenSuggestions({messages, words, onUpdate}, signal) {
     warning: res.unresolved > 0.05 ? "Some ways of reading the last word weren't explored, so probabilities may be a little high." : "",
     status: `Predicted in ${Math.round(performance.now() - t0)} ms ` +
       `(server ${Math.round(stats.total_ms)} ms: ${stats.decoded_tokens} new tokens, ${stats.rounds}+${stats.extra_rounds ?? 0} search steps)`,
+  };
+}
+
+// ── Moves ──────────────────────────────────────────────────────────────────
+
+// What kind of sentence could come next: the model's own short answers to that question, with the
+// probability it gives each. (Asking it to pick from a fixed lettered list mostly measures the
+// letter's position; see design/interactions.md.) A separate session, since this prompt has the
+// draft in the user turn and would otherwise evict the predictions' cache.
+async function tokenMoves({assignment, draft}, signal) {
+  const t0 = performance.now();
+  const prompt = await enginePrefix([{role: "user", content:
+    `${assignment}\n\nHere is my draft so far:\n\n${draft.trim() || "(nothing yet)"}\n\n` +
+    "In five words or fewer, name the rhetorical move the next sentence should make."}], "assistant");
+  const res = await enginePost("/v1/continuations", {
+    session: SESSION + ":moves", prompt, text: "",
+    stop: "[.;:\\n]|^\\s*\\S+(?:[ \\t]+\\S+){5}(?=\\s)",
+    max_rounds: 32, max_depth: 16, time_ms: 2500,
+  }, signal);
+  return {
+    // Only whole answers, and not the start of a longer one ("Op-Ed:").
+    moves: groupMoves(res.continuations.filter(c => c.done && !/:\s*$/.test(c.text))),
+    status: `Asked in ${Math.round(performance.now() - t0)} ms (server ${Math.round(res.stats.total_ms)} ms)`,
+  };
+}
+
+// The same move comes back in several wordings ("Concede a point", "concede the point."). Add up
+// those that differ only in case, articles, punctuation, or a final plural.
+function groupMoves(continuations) {
+  const groups = new Map();
+  for (const {text, prob} of continuations) {
+    const label = text.replace(/[*"“”`]/g, "").replace(/[.;:\s]+$/, "").trim().toLowerCase();
+    const key = label.replace(/\b(an?|the)\s+/g, "").replace(/s$/, "");
+    if (!/[a-z]{3}/.test(key)) continue;
+    const group = groups.get(key) ?? {text: label, best: 0, prob: 0};
+    if (prob > group.best) Object.assign(group, {text: label, best: prob});
+    group.prob += prob;
+    groups.set(key, group);
+  }
+  return [...groups.values()].map(({text, prob}) => ({text, prob}))
+    .filter(m => m.prob >= 0.01).sort((a, b) => b.prob - a.prob).slice(0, 6);
+}
+
+// ── Mirror ─────────────────────────────────────────────────────────────────
+
+// How predictable each word of the draft was, given the assignment and the draft before it.
+// A word's probability is the product of its tokens'; shading tokens instead would mark the
+// second half of every long word as predictable, which says nothing about the writer.
+// `alternative` is what the model thought most likely where the word starts, if not this word.
+async function tokenMirror({assignment, draft}, signal) {
+  const t0 = performance.now();
+  const prompt = await enginePrefix([{role: "user", content: assignment}], "assistant");
+  const {tokens, stats} = await enginePost("/v1/score", {session: SESSION + ":mirror", prompt, text: draft}, signal);
+  const words = [...draft.matchAll(/\S+/g)].map(m => ({start: m.index, end: m.index + m[0].length, logprob: 0, tokens: 0, alternative: ""}));
+  let pos = 0, w = 0;
+  for (const {text, logprob, top, top_logprob} of tokens) {
+    const firstChar = pos + text.length - text.trimStart().length;
+    pos += text.length;
+    if (firstChar === pos) continue;  // only whitespace, such as a paragraph break
+    while (w < words.length && words[w].end <= firstChar) w++;
+    if (w === words.length) break;
+    if (words[w].tokens++ === 0 && top_logprob > logprob) words[w].alternative = top;
+    words[w].logprob += logprob;
+  }
+  return {
+    words: words.filter(word => word.tokens).map(({start, end, logprob, alternative}) => ({start, end, prob: Math.exp(logprob), alternative})),
+    warning: pos === draft.length ? "" : "The scored text doesn't line up with the draft, so shading may be misplaced.",
+    status: `Read ${stats.text_tokens} tokens in ${Math.round(performance.now() - t0)} ms`,
   };
 }
