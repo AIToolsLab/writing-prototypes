@@ -90,11 +90,14 @@ in the second decimal of a logit, because the GPU computes different batch shape
 
 All bodies are JSON. `session` is optional everywhere it appears; see above.
 
-**`POST /v1/continuations`** `{session?, prompt, text, stop?, max_chars?, min_prob?, max_rounds?, max_batch?, branch?, max_depth?, time_ms?}`
+**`POST /v1/continuations`** `{session?, prompt, text, stop?, units?, max_chars?, min_prob?, max_rounds?, max_batch?, branch?, max_depth?, time_ms?}`
 
 `prompt` is the templated context (special tokens are parsed); `text` is the draft so far. A continuation stops
 growing when it matches the `stop` regex, reaches `max_chars` characters or `max_depth` tokens, or ends the turn.
-Branches under `min_prob` (default 0.01) aren't followed.
+Branches under `min_prob` (default 0.01) aren't followed, unless `units` asks for more: then the search keeps
+going, likeliest first, until it has that many distinct finished units (a unit is the text through the end of the
+`stop` match), it runs out of `max_rounds` extra rounds, or `time_ms` runs out. Such branches are replayed from the
+prompt (a few tokens each), and continuations that would only repeat a unit already found are skipped.
 
 ```json
 {"typed": " net", "prefix_logprob": -0.01, "unresolved": 4e-7,

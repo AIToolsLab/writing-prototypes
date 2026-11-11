@@ -2,7 +2,7 @@
 // (the Structured engine's). By default that's Calvin's Open WebUI, which needs each
 // person's own API key; the key is kept in this browser's localStorage and sent only there.
 
-const CHAT_URL = new URLSearchParams(location.search).get("chat-server") || "https://localai.calvin.edu/api";
+const CHAT_URL = (new URLSearchParams(location.search).get("chat-server") || "https://localai.calvin.edu/api").replace(/\/+$/, "");
 const CHAT_KEY_HOME = "https://localai.calvin.edu";  // where to get a key for the default server
 const DEFAULT_CHAT_MODEL = "nvidia-qwen3-6-35b-a3b-nvfp4";  // about 0.5 s per suggestion in 2026-11
 

@@ -13,7 +13,7 @@
 // where `messages` ends with the message being written, and each suggestion's text is to be
 // appended to that message as-is. Uses helpers from llm.js.
 
-const ENGINE_URL = new URLSearchParams(location.search).get("engine-server") || "https://llm.thoughtful-ai.com";
+const ENGINE_URL = (new URLSearchParams(location.search).get("engine-server") || "https://llm.thoughtful-ai.com").replace(/\/+$/, "");
 
 // Names this page's cache on the server, so several people can write at once without sharing one.
 const SESSION = globalThis.crypto?.randomUUID?.() ?? String(Math.random()).slice(2);
@@ -110,17 +110,20 @@ function firstUnits(text, n) {
 }
 
 // Group continuations by the unit they start with, adding up their probabilities. A unit's total is
-// a lower bound: continuations the server didn't follow (too unlikely) aren't counted.
+// a lower bound: continuations the server didn't follow (too unlikely) aren't counted. Whole words
+// come first; partial ones (the server stopped partway) only fill slots that would otherwise be empty.
 function unitSuggestions(continuations, words) {
   const units = new Map();
-  for (const {text, prob} of continuations) {
+  for (const {text, prob, done} of continuations) {
     const unit = firstUnits(text, words);
     if (!unit.text.trim()) continue;  // ending the message here isn't a suggestion
-    units.set(unit.text, (units.get(unit.text) ?? 0) + prob);
+    const u = units.get(unit.text) ?? {text: unit.text, prob: 0, complete: false};
+    u.prob += prob;
+    u.complete ||= unit.complete || !!done;
+    units.set(unit.text, u);
   }
-  // Under half a percent is noise: mostly words the server stopped following partway.
-  return [...units].map(([text, prob]) => ({text, prob})).filter(u => u.prob >= 0.005)
-    .sort((a, b) => b.prob - a.prob).slice(0, NUM_SUGGESTIONS);
+  return [...units.values()].sort((a, b) => b.complete - a.complete || b.prob - a.prob)
+    .slice(0, NUM_SUGGESTIONS).map(({text, prob}) => ({text, prob}));
 }
 
 // The continuations that are still possible after typing `extra` more characters. Their new
@@ -146,7 +149,7 @@ async function tokenSuggestions({messages, words, onUpdate}, signal) {
     if (local.length) onUpdate(local);
   }
 
-  const body = {session: SESSION, prompt, text: draft, stop: `^\\s*\\S+(?:[ \\t]+\\S+){${words - 1}}(?=\\s)`};
+  const body = {session: SESSION, prompt, text: draft, units: NUM_SUGGESTIONS, stop: `^\\s*\\S+(?:[ \\t]+\\S+){${words - 1}}(?=\\s)`};
   if (NO_SPACE_SCRIPT.test((messages.map(m => m.content).join("\n")).slice(-200))) body.max_chars = 4 * words + 2;
   const res = await enginePost("/v1/continuations", body, signal);
   lastAnswer = {prompt, words, draft, continuations: res.continuations};
@@ -155,6 +158,6 @@ async function tokenSuggestions({messages, words, onUpdate}, signal) {
     suggestions: unitSuggestions(res.continuations, words),
     warning: res.unresolved > 0.05 ? "Some ways of reading the last word weren't explored, so probabilities may be a little high." : "",
     status: `Predicted in ${Math.round(performance.now() - t0)} ms ` +
-      `(server ${Math.round(stats.total_ms)} ms: ${stats.decoded_tokens} new tokens, ${stats.rounds} search steps)`,
+      `(server ${Math.round(stats.total_ms)} ms: ${stats.decoded_tokens} new tokens, ${stats.rounds}+${stats.extra_rounds ?? 0} search steps)`,
   };
 }
