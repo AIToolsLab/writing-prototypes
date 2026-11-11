@@ -12,6 +12,7 @@
   <nav class="tabs" role="tablist">
     <button role="tab" data-mode="highlights">🖍️ Highlights</button>
     <button role="tab" data-mode="predict">📝 Predictive text</button>
+    <button role="tab" data-mode="draft">✏️ Draft</button>
   </nav>
   <label class="inline engine" title="How we get the model's opinion. Tokens reads the probabilities of what comes next from our own inference server (engine/), conditioned on the characters you typed. Structured asks a chat model to describe edits or suggestions as JSON.">
     Engine
@@ -77,6 +78,40 @@
     <a href="#" id="to-chat">Continue it as a conversation →</a></p>
 </section>
 
+<section id="draft-view">
+  <label for="assignment">Assignment</label>
+  <textarea id="assignment" class="editor short" rows="1">Write a 500-word op-ed for the campus paper about a change you'd like to see on campus.</textarea>
+
+  <label for="compose">Your draft <span class="hint">· predictions continue from the end of it</span></label>
+  <div id="compose-editor" class="overlay-editor snug">
+    <div id="compose-backdrop" class="backdrop" aria-hidden="true"></div>
+    <textarea id="compose" class="editor" spellcheck="false" placeholder="Start typing, or pick a suggestion below."></textarea>
+  </div>
+
+  <div id="stub-row" title="A pencil note about where the draft is heading. The predictions below lean toward it; the AI only heads where you pointed.">
+    <span class="pencil">✎</span>
+    <input type="text" id="stub" autocomplete="off" placeholder="Where is this heading? Jot a note, like “but cost? staff already paid”, and press Enter">
+    <span class="hint" id="stub-hint"></span>
+    <button type="button" class="link" id="stub-clear">erase</button>
+  </div>
+  <div id="predict-slot-draft"></div>
+
+  <div id="moves-row">
+    <button type="button" id="moves-ask">What could come next?</button>
+    <span class="hint">kinds of sentence, not words; picking one pencils it in as your note</span>
+    <div class="chips" id="moves"></div>
+    <div id="moves-status" class="status"></div>
+  </div>
+
+  <div class="controls">
+    <label class="inline"><input type="checkbox" id="mirror-on"> Mirror: shade my words by how predictable they were</label>
+    <span class="hint" id="mirror-legend"><span class="swatch expected">the model saw it coming</span> (over 50%) <span class="swatch surprise">it didn't</span> (under 5%); hover a word for details</span>
+  </div>
+  <div id="mirror-summary" class="message"></div>
+  <div id="mirror-status" class="status"></div>
+  <div id="mirror-warning" class="warning"></div>
+</section>
+
 <section id="chat-view">
   <div class="chat-head">
     <a href="#" id="to-rewrite">← Back to rewrite</a>
@@ -114,6 +149,7 @@
 <script src="llm.js"></script>
 <script src="engine-tokens.js"></script>
 <script src="engine-structured.js"></script>
+<script src="draft.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
