@@ -16,7 +16,9 @@ codebase is fully ours to change.
 - **Branch:** everything is on `main` (the `writing-engine` branch was merged as PR #9).
 - **The engine runs in Docker** (`engine/compose.yaml`, container `writing-engine`, `127.0.0.1:52409`,
   `restart: unless-stopped`), serving Qwen3.8-27B Q4_K_XL from `/storage/HuggingFace`, pinned to revision
-  `4ca7207`. See "Docker" in `engine/README.md`.
+  `ce331ef` (Unsloth Dynamic 3.1, released 2026-11-11; `4ca7207` before). See "Docker" in `engine/README.md`.
+  Speed per change is logged in `engine/bench/LOG.md` (`python3 engine/bench/predict_bench.py "note" --page`);
+  the target is under 200 ms per keystroke at the page.
 - **vLLM is stopped** (`~/vllm-server`, Docker Compose, port 52408, public as vllm.thoughtful-ai.com). The two
   don't fit on the RTX 4090 together. Ken said on 2026-11-11 that nobody is using vLLM right now and stopping it
   is fine; on 2026-11-11 the page dropped its vLLM engine: "Tokens" now means our engine (formerly "Trie"), served publicly as llm.thoughtful-ai.com via Caddy, and "Structured" uses the campus server with each person's own API key. Swap back with
@@ -33,7 +35,7 @@ codebase is fully ours to change.
 - The image builds against CUDA 13.0.1, not the host's 13.3: the driver (580) supports at most 13.0, and
   GeForce cards get no forward-compatibility package. No measurable cost (82 ms median keystroke at 3,300
   tokens, vs 85 ms for the bare build; 11 of 11 token-healing cases).
-- **Unsloth re-uploaded the GGUFs** under the same names (revision `ce331ef`, both Q4_K_XL and Q4_K_M differ).
+- **Unsloth re-uploaded the GGUFs** under the same names (revision `ce331ef`: their Dynamic 3.1 quants; now in use).
   Ken wants to know about revisions but not download them automatically. `engine/check-model-update.sh` compares
   file hashes and prints a NOTE; it runs from `download-model.sh` and at container start (logs only). Switching
   means downloading 17 GB, bumping `MODEL_REVISION` in `compose.yaml`, and rerunning the token-healing cases.

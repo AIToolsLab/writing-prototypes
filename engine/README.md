@@ -90,7 +90,7 @@ in the second decimal of a logit, because the GPU computes different batch shape
 
 All bodies are JSON. `session` is optional everywhere it appears; see above.
 
-**`POST /v1/continuations`** `{session?, prompt, text, stop?, units?, max_chars?, min_prob?, max_rounds?, max_batch?, branch?, max_depth?, time_ms?}`
+**`POST /v1/continuations`** `{session?, prompt, text, stop?, units?, corrections?, corrections_ms?, max_chars?, min_prob?, max_rounds?, max_batch?, branch?, max_depth?, time_ms?}`
 
 `prompt` is the templated context (special tokens are parsed); `text` is the draft so far. A continuation stops
 growing when it matches the `stop` regex, reaches `max_chars` characters or `max_depth` tokens, or ends the turn.
@@ -98,6 +98,12 @@ Branches under `min_prob` (default 0.01) aren't followed, unless `units` asks fo
 going, likeliest first, until it has that many distinct finished units (a unit is the text through the end of the
 `stop` match), it runs out of `max_rounds` extra rounds, or `time_ms` runs out. Such branches are replayed from the
 prompt (a few tokens each), and continuations that would only repeat a unit already found are skipped.
+
+`corrections: r` also follows paths that leave the typed text partway through its last word, if at least `r`
+times as likely as all the paths that keep to it, for up to `corrections_ms` (default 60) more. These come back with
+`replace: k`, the number of bytes (not characters) at the end of the text that their `text` replaces, and their
+`prob` is that ratio, not a probability given the typed text. Only the last word is reconsidered: the page keeps the
+corrections it had before a space was typed.
 
 ```json
 {"typed": " net", "prefix_logprob": -0.01, "unresolved": 4e-7,

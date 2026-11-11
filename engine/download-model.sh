@@ -5,7 +5,7 @@
 set -e
 repo=${1:-${MODEL_REPO:-unsloth/Qwen3.8-27B-GGUF}}
 file=${2:-${MODEL_FILE:-Qwen3.8-27B-UD-Q4_K_XL.gguf}}
-rev=${3:-${MODEL_REVISION:-4ca720788d1e01f1bff70c033e0d0028fd02e502}}
+rev=${3:-${MODEL_REVISION:-ce331efc48d5722b4b8041f72793e530eae18d9b}}
 export HF_HOME=${HF_HOME:-/storage/HuggingFace}
 path=$(uvx --from 'huggingface_hub>=0.34' hf download "$repo" "$file" --revision "$rev" 2>/dev/null | tail -n1 | sed "s/^path=//")
 echo "$path"

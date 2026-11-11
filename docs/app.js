@@ -347,14 +347,17 @@ function renderSuggestions() {
     btn.append(key);
     if (!item) { btn.disabled = true; continue; }
     const label = document.createElement("span");
-    label.textContent = showToken(item.text);
+    // A correction replaces the end of the draft; it shows the word it makes, and how many times
+    // as likely as what was typed.
+    label.textContent = showToken(item.label ?? item.text);
     btn.append(label);
-    if (item.prob != null) {
+    btn.classList.toggle("correction", !!item.correction);
+    if (item.note != null || item.prob != null) {
       const prob = document.createElement("small");
-      prob.textContent = item.prob < 0.005 ? "<1%" : `${Math.round(item.prob * 100)}%`;
+      prob.textContent = item.note ?? (item.prob < 0.005 ? "<1%" : `${Math.round(item.prob * 100)}%`);
       btn.append(prob);
     }
-    btn.title = item.text;
+    btn.title = item.correction ? `Replace "${draft.slice(draft.length - item.replace)}" with "${item.text}"` : item.text;
     btn.disabled = !fresh;
     btn.addEventListener("click", () => acceptSuggestion(i));
   }
@@ -364,7 +367,7 @@ function acceptSuggestion(i) {
   const {draft, items} = state.suggestions;
   const ta = activeDraft();
   if (!items[i] || ta.value !== draft) return;
-  ta.value = draft + items[i].text;
+  ta.value = draft.slice(0, draft.length - (items[i].replace ?? 0)) + items[i].text;
   ta.focus();
   ta.setSelectionRange(ta.value.length, ta.value.length);
   ta.dispatchEvent(new Event("input"));

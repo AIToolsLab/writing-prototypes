@@ -101,16 +101,32 @@ function taskMessages(instruction, doc) {
   return [{role: "user", content: `${instruction}\n\n${doc}`}];
 }
 
-// The first n words of text, if text already contains them followed by whitespace; else null.
+// Suggestions are words, never punctuation (as phone keyboards do): a unit of n words ends early at
+// punctuation, and a continuation that starts with punctuation offers nothing. Apostrophes and
+// hyphens inside a word are part of it. These patterns are also sent to the server as its `stop`
+// regex, so they must mean the same in JavaScript and in C++'s ECMAScript regexes (which see bytes:
+// hence alternations, not character classes, for the non-ASCII marks).
+const PUNCT = `[.,;:!?"()\\[\\]{}]|…|—|–|“|”`;
+const WORD = `(?:(?!${PUNCT}|-)\\S)(?:(?!${PUNCT})\\S)*`;
+
+// Matches the first n words when they're known to be whole (followed by whitespace or punctuation),
+// or just the leading whitespace when the text starts with punctuation.
+function wordUnitPattern(n) {
+  return `^\\s*${WORD}(?:[ \\t]+${WORD}){0,${n - 1}}(?=${PUNCT})` +
+    `|^\\s*${WORD}(?:[ \\t]+${WORD}){${n - 1}}(?=\\s)` +
+    `|^\\s*(?=${PUNCT}|-)`;
+}
+
+// The first n words of text, if text already shows where they end; else null. "" if it starts with punctuation.
 function completeWords(text, n) {
-  const match = text.match(new RegExp(`^\\s*\\S+(?:[ \\t]+\\S+){${n - 1}}(?=\\s)`));
+  const match = text.match(new RegExp(wordUnitPattern(n)));
   return match ? match[0] : null;
 }
 
-// Leading whitespace plus the first n whitespace-delimited words.
+// Leading whitespace plus up to the first n words, which may still be growing.
 function firstWords(text, n) {
-  const match = text.match(new RegExp(`^\\s*\\S+(?:[ \\t]+\\S+){0,${n - 1}}`));
-  return match ? match[0] : text;
+  const match = text.match(new RegExp(`^\\s*${WORD}(?:[ \\t]+${WORD}){0,${n - 1}}`));
+  return match ? match[0] : "";
 }
 
 function isSpecialToken(tok) {

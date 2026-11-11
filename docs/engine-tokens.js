@@ -119,8 +119,8 @@ function firstUnits(text, n) {
 // come first; partial ones (the server stopped partway) only fill slots that would otherwise be empty.
 function unitSuggestions(continuations, words) {
   const units = new Map();
-  for (const {text, prob, done} of continuations) {
-    const unit = firstUnits(text, words);
+  for (const {text, prob, done, end} of continuations) {
+    const unit = firstUnits(end ? text + " " : text, words);  // ending the turn ends the word too
     if (!unit.text.trim()) continue;  // ending the message here isn't a suggestion
     const u = units.get(unit.text) ?? {text: unit.text, prob: 0, complete: false};
     u.prob += prob;
@@ -131,13 +131,82 @@ function unitSuggestions(continuations, words) {
     .slice(0, NUM_SUGGESTIONS).map(({text, prob}) => ({text, prob}));
 }
 
+// ── Corrections ──
+
+// Suggestions that replace the end of the draft (the server's corrections), when the model finds
+// one at least as likely as everything that keeps what was typed, and it's spelled close to the
+// word being typed: at most 1 edit for short words, 2 otherwise, ignoring case (so iphone → iPhone
+// is free), and comparing a word still being typed with the start of the correction. Only for words
+// of 3 or more characters, keeping the first letter, and within 100× of the best correction.
+const MAX_CORRECTIONS = 2;
+const utf8 = new TextEncoder(), fromUtf8 = new TextDecoder();
+
+function correctionSuggestions(draft, continuations, words) {
+  const typedWord = draft.trimEnd().match(/\S*$/)[0];
+  if (typedWord.length < 3) return [];
+  const space = draft.match(/\s*$/)[0];
+  const bytes = utf8.encode(draft);
+  const found = new Map();
+  for (const {text, prob, end, replace} of continuations) {
+    if (!replace || prob < 1) continue;
+    const unit = firstUnits(end ? text + " " : text, words);
+    if (!unit.complete || !unit.text.trim()) continue;
+    const kept = fromUtf8.decode(bytes.slice(0, bytes.length - replace));  // the server counts bytes
+    const removed = draft.slice(kept.length);
+    const word = (kept + unit.text).match(/\S*$/)[0];
+    const atWordEnd = /\s$/.test(removed) || words > 1;
+    const close = spellingDistance(typedWord.toLowerCase(), word.toLowerCase(), !atWordEnd) <= (typedWord.length <= 4 ? 1 : 2);
+    if (!close || word === typedWord || word[0]?.toLowerCase() !== typedWord[0].toLowerCase()) continue;
+    if (/\s$/.test(kept) && /^\s/.test(unit.text)) continue;  // an odd tokenization that doubles a space
+    // Keep the space the writer typed after the word.
+    const insert = unit.text + (/\s$/.test(removed) && !/\s$/.test(unit.text) ? space : "");
+    const key = kept + insert;  // different paths to the same result add up
+    const c = found.get(key) ?? {text: insert, replace: removed.length, label: word, prob: 0};
+    c.prob += prob;
+    found.set(key, c);
+  }
+  const sorted = [...found.values()].sort((a, b) => b.prob - a.prob);
+  // A second misspelling ("learing" for "lerning") can beat the typed word too; keep near-best ones only.
+  return sorted.filter(c => c.prob >= sorted[0].prob / 100).slice(0, MAX_CORRECTIONS)
+    .map(c => ({...c, note: c.prob < 10 ? `${c.prob.toFixed(1)}×` : c.prob < 100 ? `${Math.round(c.prob)}×` : "100×+", correction: true}));
+}
+
+// The server only reconsiders the word being typed, so once a space follows it, offer the
+// corrections it had for the word without the space (carrying the space along).
+let lastCorrections = {draft: null, items: []};
+function carriedCorrections(draft) {
+  const {draft: before, items} = lastCorrections;
+  if (before === null || !draft.startsWith(before) || !/^\s+$/.test(draft.slice(before.length))) return [];
+  const space = draft.slice(before.length);
+  return items.map(c => ({...c, text: /\s$/.test(c.text) ? c.text : c.text + space, replace: c.replace + space.length}));
+}
+
+// Edits (insert, delete, substitute, swap two neighbors) to turn a into b; or, if `prefix`, into
+// whichever start of b is closest (a is a word still being typed).
+function spellingDistance(a, b, prefix) {
+  const d = Array.from({length: a.length + 1}, (_, i) => Array.from({length: b.length + 1}, (_, j) => i || j ? (i ? (j ? 0 : i) : j) : 0));
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return prefix ? Math.min(...d[a.length]) : d[a.length][b.length];
+}
+
 // The continuations that are still possible after typing `extra` more characters. Their new
 // probabilities are lower bounds: continuations we never saw might match `extra` too.
 function narrow({continuations}, extra) {
+  continuations = continuations.filter(c => !c.replace);
   const matching = continuations.filter(c => c.text.length > extra.length && c.text.startsWith(extra));
   const seen = continuations.reduce((sum, c) => sum + c.prob, 0);
   const total = matching.reduce((sum, c) => sum + c.prob, 0) + Math.max(0, 1 - seen);
   return matching.map(c => ({...c, text: c.text.slice(extra.length), prob: c.prob / total}));
+}
+
+// Corrections first, then completions in the remaining slots.
+function withCorrections(corrections, completions) {
+  return [...corrections, ...completions].slice(0, NUM_SUGGESTIONS);
 }
 
 let lastAnswer = null;  // {prompt, words, draft, continuations}
@@ -154,13 +223,17 @@ async function tokenSuggestions({messages, words, onUpdate}, signal) {
     if (local.length) onUpdate(local);
   }
 
-  const body = {session: SESSION, prompt, text: draft, units: NUM_SUGGESTIONS, stop: `^\\s*\\S+(?:[ \\t]+\\S+){${words - 1}}(?=\\s)`};
+  const body = {session: SESSION, prompt, text: draft, units: NUM_SUGGESTIONS, corrections: 1, time_ms: 150, stop: wordUnitPattern(words)};
   if (NO_SPACE_SCRIPT.test((messages.map(m => m.content).join("\n")).slice(-200))) body.max_chars = 4 * words + 2;
   const res = await enginePost("/v1/continuations", body, signal);
   lastAnswer = {prompt, words, draft, continuations: res.continuations};
+  let corrections = correctionSuggestions(draft, res.continuations, words);
+  if (!corrections.length) corrections = carriedCorrections(draft);
+  else lastCorrections = {draft, items: corrections};
+  if (!/\s$/.test(draft) && !corrections.length) lastCorrections = {draft, items: []};
   const {stats} = res;
   return {
-    suggestions: unitSuggestions(res.continuations, words),
+    suggestions: withCorrections(corrections, unitSuggestions(res.continuations.filter(c => !c.replace), words)),
     warning: res.unresolved > 0.05 ? "Some ways of reading the last word weren't explored, so probabilities may be a little high." : "",
     status: `Predicted in ${Math.round(performance.now() - t0)} ms ` +
       `(server ${Math.round(stats.total_ms)} ms: ${stats.decoded_tokens} new tokens, ${stats.rounds}+${stats.extra_rounds ?? 0} search steps)`,

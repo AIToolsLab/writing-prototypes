@@ -16,7 +16,7 @@ services:
     environment:
       - MODEL_REPO=${MODEL_REPO:-unsloth/Qwen3.8-27B-GGUF}
       - MODEL_FILE=${MODEL_FILE:-Qwen3.8-27B-UD-Q4_K_XL.gguf}
-      - MODEL_REVISION=${MODEL_REVISION:-4ca720788d1e01f1bff70c033e0d0028fd02e502}
+      - MODEL_REVISION=${MODEL_REVISION:-ce331efc48d5722b4b8041f72793e530eae18d9b}
     # Extra engine options (--ctx, --seqs, --gpu-layers); see README.
     command: --alias Qwen3.8-27B
     logging:

@@ -34,6 +34,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -573,6 +574,7 @@ struct Node {
     bool end = false;      // an end-of-turn token
     bool done = false;     // won't be extended
     bool reserve = false;  // under the probability bar: only expanded to reach `units` distinct continuations
+    int start = -1;        // a correction: the offset in the typed text where it leaves it (and its text starts)
     bool expanded = false;
     llama_seq_id seq = -1; // holds this node's state while children may still fork from it
     int pending = 0;       // children that may still need that state
@@ -580,7 +582,7 @@ struct Node {
 };
 
 struct Expansion {
-    struct Child { llama_token token; double logprob; bool reserve = false; };
+    struct Child { llama_token token; double logprob; bool reserve = false; int start = -1; };
     std::vector<Child> children;
     double covering_mass = 0;   // probability, within a not-yet-covering node, of tokens that reach past the typed text
 };
@@ -591,6 +593,10 @@ json Engine::continuations(const json & req, uint64_t id) {
     int max_depth = req.value("max_depth", 8), max_chars = req.value("max_chars", 0);
     double min_prob = req.value("min_prob", 0.01), time_ms = req.value("time_ms", 400.0);
     int units = req.value("units", 0);  // keep going (past min_prob if need be) until this many distinct finished units
+    // Also follow paths that leave the typed text partway (corrections), if at least this many times as likely as all
+    // the paths that keep to it. 0: don't.
+    double corrections = req.value("corrections", 0.0);
+    double corrections_ms = req.value("corrections_ms", 60.0);  // time for that, on top of the rest
     bool has_stop = req.contains("stop") && req["stop"].is_string();
     std::regex stop;
     if (has_stop) {
@@ -608,6 +614,8 @@ json Engine::continuations(const json & req, uint64_t id) {
     // The characters to condition on. They never reach back into the prompt past a control token, but may
     // include the end of the prompt (e.g. its final newlines), since the reply's first token can merge with it.
     std::string typed = full.substr(tokenized.offsets[n_settled]);
+    // Corrections may only replace the draft, not the end of the prompt.
+    size_t edit_from = prompt.size() > tokenized.offsets[n_settled] ? prompt.size() - tokenized.offsets[n_settled] : 0;
     Tokens target(tokenized.tokens.begin(), tokenized.tokens.begin() + n_settled);
     double t_tokenize = now_ms() - t0;
     if (superseded()) throw Superseded{};
@@ -622,10 +630,13 @@ json Engine::continuations(const json & req, uint64_t id) {
     double unresolved = 0;   // probability of paths still inside `typed` that we haven't expanded
     if (typed.empty()) covered = 1;
 
+    // A continuation's text: after the typed text, or for a correction, from where it leaves it.
+    auto cont_of = [&](const Node & n) { return n.text.substr(n.start >= 0 ? n.start : typed.size()); };
+
     auto is_done = [&](const Node & n) {
         if (n.end) return true;
         if (!n.covers) return false;
-        std::string cont = n.text.substr(typed.size());
+        std::string cont = cont_of(n);
         if (incomplete_utf8_tail(cont)) return n.past >= max_depth + 2;
         if (n.past >= max_depth) return true;
         if (max_chars > 0 && (int) utf8_length(cont) >= max_chars) return true;
@@ -659,6 +670,23 @@ json Engine::continuations(const json & req, uint64_t id) {
                 out.covering_mass += std::exp(lp);
                 if (lp >= floor) candidates.push_back({*it, lp, lp < threshold});
             }
+            // Tokens that leave the typed text: candidate corrections, kept as reserves.
+            if (corrections > 0) {
+                std::vector<Expansion::Child> leaving;
+                for (llama_token t = 0; t < n_vocab; t++) {
+                    const std::string & pc = piece[t];
+                    if (pc.empty() || is_eog[t]) continue;
+                    size_t c = 0;
+                    while (c < pc.size() && c < rest.size() && pc[c] == rest[c]) c++;
+                    if (c == pc.size() || c == rest.size()) continue;  // keeps to the typed text
+                    while (c > 0 && (rest[c] & 0xC0) == 0x80) c--;    // leave at a character boundary
+                    if (node.text.size() + c < edit_from) continue;
+                    leaving.push_back({t, base + logits[t], true, (int) (node.text.size() + c)});
+                }
+                size_t k = std::min<size_t>(leaving.size(), 4);
+                std::partial_sort(leaving.begin(), leaving.begin() + k, leaving.end(), [](auto & a, auto & b) { return a.logprob > b.logprob; });
+                out.children.insert(out.children.end(), leaving.begin(), leaving.begin() + k);
+            }
         }
         size_t keep = std::min<size_t>(candidates.size(), branch);
         std::partial_sort(candidates.begin(), candidates.begin() + keep, candidates.end(), [](auto & a, auto & b) { return a.logprob > b.logprob; });
@@ -672,9 +700,11 @@ json Engine::continuations(const json & req, uint64_t id) {
         for (const auto & c : e.children) {
             Node child{ni, c.token, c.logprob, nodes[ni].text + piece[c.token], nodes[ni].depth + 1, 0, false};
             child.end = is_eog[c.token];
-            child.covers = nodes[ni].covers || child.text.size() >= typed.size();
+            child.start = c.start >= 0 ? c.start : nodes[ni].start;
+            bool leaves_typed = child.start >= 0;
+            child.covers = leaves_typed || nodes[ni].covers || child.text.size() >= typed.size();
             child.past = nodes[ni].covers ? nodes[ni].past + 1 : 0;
-            if (!nodes[ni].covers && child.text.size() == typed.size()) covered += std::exp(c.logprob);
+            if (!leaves_typed && !nodes[ni].covers && child.text.size() == typed.size()) covered += std::exp(c.logprob);
             if (!child.covers) unresolved += std::exp(c.logprob);
             child.done = is_done(child);
             child.reserve = c.reserve;
@@ -691,13 +721,50 @@ json Engine::continuations(const json & req, uint64_t id) {
         for (auto & n : nodes) release(n);
     };
 
-    // The unit a continuation offers: through the end of its `stop` match, or all of it.
+    // The unit a continuation offers: through the end of its `stop` match (ending the turn counts as a space
+    // after it), or all of it.
     auto unit_of = [&](const Node & n) {
-        std::string cont = n.text.substr(typed.size());
+        std::string cont = cont_of(n);
         cont.resize(cont.size() - incomplete_utf8_tail(cont));
+        std::string probe = n.end ? cont + " " : cont;
         std::smatch m;
-        if (has_stop && !n.end && std::regex_search(cont, m, stop)) cont.resize(m.position(0) + m.length(0));
+        if (has_stop && std::regex_search(probe, m, stop)) cont = probe.substr(0, m.position(0) + m.length(0));
         return cont;
+    };
+
+    // Expand nodes whose parents' states are gone, replaying each from the settled prompt (a few tokens).
+    // All children are reserves, since nothing keeps this state; later rounds pick among them by probability.
+    auto replay_expand = [&](std::vector<int> batch) {
+        batch.resize(std::min<size_t>({batch.size(), (size_t) max_batch, free_seqs.size()}));
+        if (batch.empty()) return false;
+        std::vector<std::array<int, 3>> items;
+        std::vector<char> want;
+        std::vector<int> last_index;
+        std::vector<llama_seq_id> seqs;
+        for (int ni : batch) {
+            llama_seq_id seq = free_seqs.back(); free_seqs.pop_back();
+            seqs.push_back(seq);
+            llama_memory_seq_cp(mem, s->seq, seq, -1, -1);
+            Tokens path;
+            for (int i = ni; i > 0; i = nodes[i].parent) path.push_back(nodes[i].token);
+            std::reverse(path.begin(), path.end());
+            for (size_t k = 0; k < path.size(); k++) {
+                items.push_back({path[k], (int) (target.size() + k), seq});
+                want.push_back(k + 1 == path.size());
+            }
+            last_index.push_back((int) items.size() - 1);
+        }
+        auto free_all = [&] { for (auto seq : seqs) { llama_memory_seq_rm(mem, seq, -1, -1); free_seqs.push_back(seq); } };
+        try { decode(items, want); } catch (...) { free_all(); throw; }
+        std::vector<Expansion> expansions(batch.size());
+        std::vector<const float *> logits(batch.size());
+        for (size_t i = 0; i < batch.size(); i++) logits[i] = llama_get_logits_ith(ctx, last_index[i]);
+        parallel_for(batch.size(), [&](size_t i) {
+            expansions[i] = expand(nodes[batch[i]], logits[i], INFINITY, nodes[batch[i]].logprob + std::log(1e-3));
+        });
+        for (size_t i = 0; i < batch.size(); i++) apply(batch[i], expansions[i]);
+        free_all();
+        return true;
     };
 
     int rounds = 0, extra_rounds = 0;
@@ -750,77 +817,74 @@ json Engine::continuations(const json & req, uint64_t id) {
             }
         }
 
-        // Too few distinct units: expand the likeliest reserves (and leftovers) until there are enough.
-        // Their parents' states are gone by now, so each is replayed from the settled prompt; it's a few tokens.
-        for (; units > 0 && extra_rounds < max_rounds && now_ms() - t0 < time_ms; extra_rounds++) {
+        // Then, sharing each batch: if there are too few distinct units, the likeliest reserves (and leftovers),
+        // until there are enough; and corrections at least `corrections` times as likely as the typed text (a
+        // path's probability only falls as it grows, so paths under that bar can't lead to one), for at most
+        // `corrections_ms`. Their parents' states are gone by now, so each is replayed from the settled prompt.
+        double t_extra = now_ms();
+        for (; extra_rounds < max_rounds && now_ms() - t0 < time_ms; extra_rounds++) {
             if (superseded()) throw Superseded{};
-            std::set<std::string> found;
-            for (const Node & n : nodes) {
-                if (!n.covers || !n.done) continue;
-                std::string u = unit_of(n);
-                if (u.find_first_not_of(" \t\n\r") != std::string::npos) found.insert(u);
-            }
-            if ((int) found.size() >= units) break;
-            std::vector<int> batch;
-            for (size_t i = 1; i < nodes.size(); i++) {
-                const Node & n = nodes[i];
-                if (!n.covers || n.expanded || n.done) continue;
-                // Skip a word that is already complete and already found (e.g. " fun" once " fun pets" is in).
-                std::string probe = unit_of(n) + " ";
-                std::smatch m;
-                if (has_stop && std::regex_search(probe, m, stop) && found.count(probe.substr(0, m.position(0) + m.length(0)))) continue;
-                batch.push_back(i);
-            }
-            if (batch.empty()) break;
-            std::sort(batch.begin(), batch.end(), [&](int a, int b) { return nodes[a].logprob > nodes[b].logprob; });
-            batch.resize(std::min<size_t>({batch.size(), (size_t) max_batch, free_seqs.size()}));
-            if (batch.empty()) break;
-
-            std::vector<std::array<int, 3>> items;
-            std::vector<char> want;
-            std::vector<int> last_index;
-            std::vector<llama_seq_id> seqs;
-            for (int ni : batch) {
-                llama_seq_id seq = free_seqs.back(); free_seqs.pop_back();
-                seqs.push_back(seq);
-                llama_memory_seq_cp(mem, s->seq, seq, -1, -1);
-                Tokens path;
-                for (int i = ni; i > 0; i = nodes[i].parent) path.push_back(nodes[i].token);
-                std::reverse(path.begin(), path.end());
-                for (size_t k = 0; k < path.size(); k++) {
-                    items.push_back({path[k], (int) (target.size() + k), seq});
-                    want.push_back(k + 1 == path.size());
+            std::vector<int> more, fixes;
+            if (units > 0) {
+                std::set<std::string> found;
+                for (const Node & n : nodes) {
+                    if (!n.covers || !n.done || n.start >= 0) continue;
+                    std::string u = unit_of(n);
+                    if (u.find_first_not_of(" \t\n\r") != std::string::npos) found.insert(u);
                 }
-                last_index.push_back((int) items.size() - 1);
+                if ((int) found.size() < units) {
+                    for (size_t i = 1; i < nodes.size(); i++) {
+                        const Node & n = nodes[i];
+                        if (!n.covers || n.expanded || n.done || n.start >= 0) continue;
+                        // Skip a word that is already complete and already found (e.g. " fun" once " fun pets" is in).
+                        std::string probe = unit_of(n) + " ";
+                        std::smatch m;
+                        if (has_stop && std::regex_search(probe, m, stop) && found.count(probe.substr(0, m.position(0) + m.length(0)))) continue;
+                        more.push_back(i);
+                    }
+                }
             }
-            try { decode(items, want); }
-            catch (...) { for (auto seq : seqs) { llama_memory_seq_rm(mem, seq, -1, -1); free_seqs.push_back(seq); } throw; }
-            std::vector<Expansion> expansions(batch.size());
-            std::vector<const float *> logits(batch.size());
-            for (size_t i = 0; i < batch.size(); i++) logits[i] = llama_get_logits_ith(ctx, last_index[i]);
-            // All children are reserves: nothing keeps this state, so the next round picks among them by probability.
-            parallel_for(batch.size(), [&](size_t i) {
-                expansions[i] = expand(nodes[batch[i]], logits[i], INFINITY, nodes[batch[i]].logprob + std::log(1e-3));
-            });
-            for (size_t i = 0; i < batch.size(); i++) apply(batch[i], expansions[i]);
-            for (auto seq : seqs) { llama_memory_seq_rm(mem, seq, -1, -1); free_seqs.push_back(seq); }
+            if (corrections > 0 && now_ms() - t_extra < corrections_ms) {
+                for (size_t i = 1; i < nodes.size(); i++) {
+                    const Node & n = nodes[i];
+                    if (n.start >= 0 && !n.expanded && !n.done && std::exp(n.logprob) >= covered * corrections) fixes.push_back(i);
+                }
+            }
+            if (more.empty() && fixes.empty()) break;
+            auto likeliest = [&](int a, int b) { return nodes[a].logprob > nodes[b].logprob; };
+            std::sort(more.begin(), more.end(), likeliest);
+            std::sort(fixes.begin(), fixes.end(), likeliest);
+            // Up to half the batch for each, and whatever the other leaves.
+            size_t half = max_batch / 2;
+            size_t n_fixes = std::min(fixes.size(), std::max(half, max_batch - std::min(more.size(), half)));
+            std::vector<int> batch(fixes.begin(), fixes.begin() + n_fixes);
+            batch.insert(batch.end(), more.begin(), more.begin() + std::min(more.size(), max_batch - n_fixes));
+            if (!replay_expand(batch)) break;
         }
     } catch (...) { cleanup(); throw; }
     cleanup();
 
     // The leaves that cover the typed text are disjoint events; report each one's probability given the typed text.
     // `covered` only grows as more paths are expanded, so these are upper bounds by at most unresolved / covered.
-    std::map<std::pair<std::string, bool>, std::pair<double, bool>> leaves;  // (text, end) → (probability, done)
+    // Corrections aren't given the typed text, so theirs is a ratio: how many times as likely as the typed text.
+    // A correction replaces the last `replace` bytes of the typed text with its text.
+    std::map<std::tuple<std::string, bool, size_t>, std::pair<double, bool>> leaves;  // (text, end, replace) → (probability, done)
     for (const Node & n : nodes) {
         if (!n.covers || n.kept > 0 || (n.expanded && !n.end)) continue;
-        std::string cont = n.text.substr(typed.size());
+        if (n.start >= 0 && std::exp(n.logprob) < covered * corrections) continue;
+        std::string cont = cont_of(n);
         cont.resize(cont.size() - incomplete_utf8_tail(cont));
-        auto & leaf = leaves[{cont, n.end}];
+        auto & leaf = leaves[{cont, n.end, n.start >= 0 ? typed.size() - n.start : 0}];
         leaf.first += std::exp(n.logprob) / covered;
         leaf.second = leaf.second || n.done;
     }
     json list = json::array();
-    for (const auto & [key, value] : leaves) list.push_back({{"text", key.first}, {"prob", value.first}, {"end", key.second}, {"done", value.second}});
+    for (const auto & [key, value] : leaves) {
+        const auto & [cont, end, replace] = key;
+        json item = {{"text", cont}, {"prob", value.first}, {"end", end}, {"done", value.second}};
+        if (replace > 0) item["replace"] = replace;
+        list.push_back(item);
+    }
     std::sort(list.begin(), list.end(), [](const json & a, const json & b) { return a["prob"].get<double>() > b["prob"].get<double>(); });
 
     return {

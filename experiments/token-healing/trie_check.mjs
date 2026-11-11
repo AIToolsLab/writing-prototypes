@@ -14,7 +14,7 @@ const DOC = "Deep learning neural network technology advances are pretty cool if
   "to use it in ways that don't take stuff from people.";
 
 const server = process.env.ENGINE_SERVER;
-const ctx = vm.createContext({location: {search: `?engine-server=${server ?? "http://localhost:52409"}`}, URLSearchParams, fetch, performance, console, Intl, DOMException});
+const ctx = vm.createContext({location: {search: `?engine-server=${server ?? "http://localhost:52409"}`}, URLSearchParams, fetch, performance, console, Intl, DOMException, TextEncoder, TextDecoder});
 vm.runInContext(["llm.js", "engine-tokens.js"].map(f => fs.readFileSync(docs + f, "utf8")).join("\n") +
   "\nglobalThis.engine = {taskMessages, trieEngine: tokensEngine};", ctx);
 const {taskMessages, trieEngine} = ctx.engine;
