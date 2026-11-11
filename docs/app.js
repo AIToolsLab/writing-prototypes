@@ -349,7 +349,15 @@ function renderSuggestions() {
     const label = document.createElement("span");
     // A correction replaces the end of the draft; it shows the word it makes, and how many times
     // as likely as what was typed.
-    label.textContent = showToken(item.label ?? item.text);
+    // A completion of the word being typed shows the whole word, the typed part grayed out.
+    const typed = !item.correction && /^\S/.test(item.text) ? draft.match(/\S*$/)[0] : "";
+    if (typed) {
+      const before = document.createElement("span");
+      before.className = "typed";
+      before.textContent = typed;
+      label.append(before);
+    }
+    label.append(showToken(item.label ?? item.text));
     btn.append(label);
     btn.classList.toggle("correction", !!item.correction);
     if (item.note != null || item.prob != null) {

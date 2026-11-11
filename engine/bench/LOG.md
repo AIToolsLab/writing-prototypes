@@ -22,3 +22,5 @@ Commit is the working tree's (`+`: server.cpp uncommitted), which is only the ru
 | 2026-11-11 | 85d3618+ | Qwen3.8-27B@4ca7207 | `page + {"time_ms": 150}` | time_ms 150 | 688 | 101 | 164 | 198 | 23 |
 | 2026-11-11 | 85d3618+ | Qwen3.8-27B@ce331ef | `page` | Unsloth Dynamic 3.1 quant | 148 | 98 | 174 | 232 | 23.5 |
 | 2026-11-11 | 85d3618+ | Qwen3.8-27B@ce331ef | `page` | Unsloth Dynamic 3.1 quant | 688 | 99 | 171 | 202 | 22 |
+| 2026-11-11 | b56f8e6 | Qwen3.8-27B@ce331ef | `page` | punctuation inside words; markup chars end words | 148 | 116 | 180 | 232 | 23 |
+| 2026-11-11 | b56f8e6 | Qwen3.8-27B@ce331ef | `page` | punctuation inside words; markup chars end words | 688 | 104 | 170 | 205 | 22 |

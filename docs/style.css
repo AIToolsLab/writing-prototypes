@@ -219,6 +219,7 @@ body:not(.mode-predict) .predict-only { display: none; }
 #suggestions button small { flex-shrink: 0; color: #888; font-size: 0.75rem; }
 #suggestions button.correction span { text-decoration: underline wavy #c77d00 1px; text-underline-offset: 3px; }
 #suggestions button.correction small { color: #c77d00; }
+#suggestions button span.typed { color: #aaa; }
 #suggestions button kbd { flex-shrink: 0; }
 
 /* ── Draft ── */

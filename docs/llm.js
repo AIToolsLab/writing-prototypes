@@ -103,17 +103,21 @@ function taskMessages(instruction, doc) {
 
 // Suggestions are words, never punctuation (as phone keyboards do): a unit of n words ends early at
 // punctuation, and a continuation that starts with punctuation offers nothing. Apostrophes and
-// hyphens inside a word are part of it. These patterns are also sent to the server as its `stop`
+// hyphens inside a word are part of it, and so is other punctuation between letters (below). These patterns are also sent to the server as its `stop`
 // regex, so they must mean the same in JavaScript and in C++'s ECMAScript regexes (which see bytes:
 // hence alternations, not character classes, for the non-ASCII marks).
-const PUNCT = `[.,;:!?"()\\[\\]{}]|…|—|–|“|”`;
-const WORD = `(?:(?!${PUNCT}|-)\\S)(?:(?!${PUNCT})\\S)*`;
+const PUNCT = `[.,;:!?"()\\[\\]{}*<>\`]|…|—|–|“|”`;  // * < > ` for Markdown and HTML
+const WORD_START = `(?:(?!${PUNCT}|-)\\S)`, WORD_CHAR = `(?:(?!${PUNCT})\\S)`;
+// Punctuation inside a word is part of it: "U.S." and "e.g." (dots between letters, and the last
+// one), "1,000", "and/or".
+const WORD = `(?:(?:${WORD_START}${WORD_CHAR}*\\.){2,}|${WORD_START}(?:${WORD_CHAR}|[.,:/](?=${WORD_START}))*)`;
 
-// Matches the first n words when they're known to be whole (followed by whitespace or punctuation),
-// or just the leading whitespace when the text starts with punctuation.
+// Matches the first n words when they're known to be whole (followed by whitespace, or by punctuation
+// that isn't inside a word, which takes seeing what follows it), or just the leading whitespace when
+// the text starts with punctuation. Whitespace first, so "U.S. law" isn't cut at "U.S".
 function wordUnitPattern(n) {
-  return `^\\s*${WORD}(?:[ \\t]+${WORD}){0,${n - 1}}(?=${PUNCT})` +
-    `|^\\s*${WORD}(?:[ \\t]+${WORD}){${n - 1}}(?=\\s)` +
+  return `^\\s*${WORD}(?:[ \\t]+${WORD}){${n - 1}}(?=\\s)` +
+    `|^\\s*${WORD}(?:[ \\t]+${WORD}){0,${n - 1}}(?=(?:${PUNCT})(?:\\s|${PUNCT}))` +
     `|^\\s*(?=${PUNCT}|-)`;
 }
 
