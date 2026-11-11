@@ -1,8 +1,9 @@
 # Interaction sketches
 
 Concrete examples of the eight candidate features in [HANDOFF.md](../HANDOFF.md), Task 2. One document
-runs through all of them so they're easy to compare. **Every probability below is made up to illustrate the
-idea**; none of this has been run, since the engine is offline while it's being Dockerized.
+runs through all of them so they're easy to compare. **Probabilities in the mockups are made up** to illustrate
+the idea. Sections marked *Measured* report real runs against the engine (Qwen3.8-27B, 2026-11-11), reproducible
+with [`experiments/interactions/probe.py`](../experiments/interactions/probe.py).
 
 The fence, restated: the AI may sketch ahead *or* spell the next word, never both. When revising, the model
 reads and the human writes.
@@ -80,30 +81,42 @@ What could come next?  give an example 34% · concede a cost 22% · restate the 
 
 Clicking "concede a cost" turns it into a stub (feature 1): `✎ concede a cost`. No prose is ever shown.
 
-**How.** This one can run today with no new endpoint. Ask a multiple-choice question and read the
-distribution over the answer letter:
+**How: not a multiple-choice letter.** The first sketch asked a lettered multiple-choice question and read
+the probability of each answer letter, in one forward pass. *Measured:* it doesn't work.
+
+- Only 34–41% of the probability goes to any letter at all; the rest starts a prose answer ("To…", "The…").
+- The letter **B** wins in all three option orders tried (15–23%), whichever move it labels: "concede a cost",
+  then "cite evidence", then "give an example". The numbers mostly measure position.
+
+Scoring each fixed label as text after "The next sentence should" didn't work either: the model wants to bold
+its answer (`**`), and that swamps the differences between labels.
+
+**How: free phrases.** Let the model finish "The next sentence should" itself, with `/v1/continuations`
+(4-word stop, about 400 ms). *Measured,* on P1:
 
 ```
-user:      [assignment]
-           Here is a draft so far:  [draft]
-           What should the next sentence do?
-           A. give an example   B. concede a cost   C. restate the claim   D. cite evidence   E. describe a scene
-           Answer with one letter.
-assistant: ▌
+0.131  expand on the negative consequences
+0.112  expand on the specific negative
+0.025  expand on the specific consequences
+0.023  broaden the scope of the
+0.022  provide specific evidence or a
+0.012  transition from the problem to
+0.010  acknowledge the likely counter
 ```
 
-`/v1/continuations {prompt, text: "", max_depth: 1, branch: 12}` → probabilities of `A`…`E`. One
-forward pass.
+Coarse, specific to this draft, with real probabilities. The cost is that one move is split across several
+wordings, so something has to group them (and strip the `**`).
 
-**Doubts.**
-- **These numbers mean something different from predictive text's.** They're the model's opinion as an
-  *editor* ("what should come next"), not the distribution of what writers *do* next. A more honest version:
-  take the engine's sentence-level continuations (which it already finds) and have a model classify each into a
-  move. Then 22% means "22% of likely next sentences concede something." Costlier, and the prose is never shown.
-- **Letter bias.** Models favor some answer letters. Shuffle the order per request, or average two orders.
-- **Where do the moves come from?** A fixed list (teachable, comparable across students, but generic) or
-  generated per draft by the campus model ("mention night staffing": specific, but closer to writing the idea
-  for them). I'd start fixed.
+**Two numbers that mean different things.**
+- *The model's advice as an editor*: the free phrases above. "What should come next."
+- *What writers do next*: take the engine's likely next sentences of the draft itself and label the move each
+  makes (with the campus model). Then 22% means "22% of likely next sentences concede something." Costlier, and
+  the prose is never shown.
+
+Predictive text shows the second kind of number. Showing the first kind in the same style could mislead.
+
+**Question.** A fixed list of moves is teachable and comparable across students; free phrases are specific to
+the draft but closer to supplying the idea. Free phrases with light grouping may be a middle ground.
 
 ## 3. The mirror
 
@@ -148,13 +161,23 @@ max_rounds: 400, time_ms: 30000}`. Each round extends the single branch by one t
 must be 0 or the search stops once the path's probability falls under 1%. Greedy output is the model's single
 most likely draft, which may suit the mirror better than a sample, though it can loop.
 
+**Framing: two-sided.** Both too surprising ("weird") and too predictable ("boring") read badly. So the mirror
+isn't "more surprise is better", which also makes it harder to game: odd word choices get flagged too. The
+closest prior work I know of is GLTR (2019), which colors each token by its rank under the model, but to detect
+generated text, not to help a writer.
+
 **Doubts.**
+- **Model surprise isn't reader surprise.** A typo is a big spike to the model and nothing to a reader, who
+  reads through it. Highlights already return the model's top choice at each token, so a spike whose top choice
+  is within an edit or two of the written word can be marked as a likely typo instead. Rare-but-correct words
+  (names, jargon) are harder: the model is surprised and the reader isn't.
+- **The right amount of surprise depends on position.** A thesis sentence should surprise; a transition
+  shouldn't. One fixed "good" band would mark both wrong. Safer to flag only clear extremes (a sentence with
+  almost no surprise, or a single spike) and let the writer judge the rest.
 - "Predictable" means given the writer's *own* earlier text too. If a writer sets up a surprising idea, the
   sentences that follow from it are shaded as predictable. I think that's right (originality is credited where
   it enters), but it'll look unfair to students.
 - Function words are always ░. That's noise; maybe shade only content words, or only show sentence totals.
-- Is this for the writer's own reflection, or will students and instructors read it as a score? If it's a
-  score, it's as gameable as bits (write odd words, get credit).
 
 ## 4. Count choices, not bits
 
@@ -285,6 +308,30 @@ prompt like "This paragraph's point:". It shows whether the paragraph supports t
 without generating anything. Runs on the local engine today, and makes the writer say what they meant before
 seeing a verdict.
 
+**Several readings, so it doesn't read as authoritative.** Show a few divergent interpretations instead of one
+gist. The divergence should come from the paragraph, not be built in. Reader personas (skeptical administrator,
+tired student) give several readings even for a perfectly clear paragraph; then the spread says nothing, and the
+writer learns to defend against misreadings no one would have. If the readings come from the model's own
+distribution, the spread is the signal: they agree on a clear paragraph and split on an ambiguous one.
+
+*Measured,* a cheap version on the local engine: free continuations of "This paragraph claims that" (6-word stop).
+
+```
+P1  0.165  the library should extend its hours to
+    0.162  the library should remain open 24
+    0.097  the library should remain open all night
+    0.043  the library should remain open overnight during
+P2  0.120  extending the library's
+    0.076  extending library hours for
+    0.046  the cost of keeping
+    0.039  extending library hours is
+```
+
+P1's readings agree, as they should. P2's are still restating the topic after six words, so they can't yet
+show whether readers take the point as "staff are already there" or "small next to tuition". The readings
+mostly differ in wording, not meaning. This needs longer readings plus grouping by meaning, probably with the
+campus model.
+
 **Doubt.** Gist-back generates text, but it's behind the writer (summarizing what they wrote), not ahead. A
 student could still collect the gists into an abstract or outline they didn't write.
 
@@ -297,7 +344,8 @@ student could still collect the gists into an abstract or outline they didn't wr
 | Mechanism | Features | Engine today |
 |---|---|---|
 | Condition predictions on a note | 1, 2 (its output), 5 | works |
-| Probability of a fixed set of options | 2, gist-check | works (letter trick; or N scores) |
+| Distribution over short coarse phrases | 2, 8 (several readings) | works; needs grouping by meaning |
+| Probability of a given text | gist-check | works |
 | Following text scored after two versions | 6, 7 | works (two scores); `/v1/compare` would speed it up |
 | Per-token score of the writer's text | 3 | works |
 | Free generation | 3 (generic draft), 8 | greedy works, untested; 8 wants the campus model |
@@ -305,9 +353,8 @@ student could still collect the gists into an abstract or outline they didn't wr
 
 **Sessions.** Each feature with its own prompt layout (moves puts the draft in the user turn, stubs change the
 user turn) is a different cached text. Give each its own session name per tab (`${SESSION}:moves`) or they'll
-evict each other's cache on every switch. That multiplies sessions per writer, and sessions are what's scarce:
-about four fit on the GPU before they start moving to host memory (12 sequences, a main and two checkpoints
-each), so that's one writer using three features, not four writers.
+evict each other's cache on every switch. That multiplies sessions per writer. About four fit on the GPU before
+they move to host memory, but restoring one is cheap, so this isn't a real limit at prototype scale.
 
 **Suggested order.** Build stubs (1) first, since 2's output and 5 both reuse it. Then the either/or scorer
 (7), which gives you ripples (6) almost free. The mirror (3) is mostly a display change on top of highlights.
