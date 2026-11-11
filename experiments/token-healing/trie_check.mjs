@@ -1,4 +1,4 @@
-// Run the Trie engine (docs/engine-trie.js, against engine/server.cpp) on the cases in cases.json.
+// Run the Tokens engine (docs/engine-tokens.js, called the Trie engine until 2026-11-11, against engine/server.cpp) on the cases in cases.json.
 //
 //   node trie_check.mjs                    # all cases
 //   node trie_check.mjs "Deep neural net"  # just these drafts
@@ -14,9 +14,9 @@ const DOC = "Deep learning neural network technology advances are pretty cool if
   "to use it in ways that don't take stuff from people.";
 
 const server = process.env.ENGINE_SERVER;
-const ctx = vm.createContext({location: {search: server ? `?engine-server=${server}` : ""}, URLSearchParams, fetch, performance, console, Intl, DOMException});
-vm.runInContext(["llm.js", "engine-tokens.js", "engine-trie.js"].map(f => fs.readFileSync(docs + f, "utf8")).join("\n") +
-  "\nglobalThis.engine = {taskMessages, trieEngine};", ctx);
+const ctx = vm.createContext({location: {search: `?engine-server=${server ?? "http://localhost:52409"}`}, URLSearchParams, fetch, performance, console, Intl, DOMException});
+vm.runInContext(["llm.js", "engine-tokens.js"].map(f => fs.readFileSync(docs + f, "utf8")).join("\n") +
+  "\nglobalThis.engine = {taskMessages, trieEngine: tokensEngine};", ctx);
 const {taskMessages, trieEngine} = ctx.engine;
 
 const args = process.argv.slice(2);

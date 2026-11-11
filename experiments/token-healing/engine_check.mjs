@@ -4,19 +4,21 @@
 //   node engine_check.mjs "Deep neural net"  # just these drafts
 //
 // Loads docs/llm.js and docs/engine-tokens.js into a VM context with the few browser globals
-// they use. Set VLLM_SERVER to use a different server.
+// they use. Set VLLM_SERVER to use a different server. The vLLM engine was removed from the page
+// on 2026-11-11, so this loads both files as of commit 323ad08.
 
 import fs from "fs";
 import vm from "vm";
+import {execFileSync} from "child_process";
 
 const here = new URL(".", import.meta.url).pathname;
-const docs = new URL("../../docs/", import.meta.url).pathname;
+const atCommit = f => execFileSync("git", ["show", `323ad08:docs/${f}`], {cwd: here, encoding: "utf8"});
 const DOC = "Deep learning neural network technology advances are pretty cool if you are careful " +
   "to use it in ways that don't take stuff from people.";
 
 const server = process.env.VLLM_SERVER;
 const ctx = vm.createContext({location: {search: server ? `?server=${server}` : ""}, URLSearchParams, fetch, performance, console});
-vm.runInContext(fs.readFileSync(docs + "llm.js", "utf8") + "\n" + fs.readFileSync(docs + "engine-tokens.js", "utf8") +
+vm.runInContext(atCommit("llm.js") + "\n" + atCommit("engine-tokens.js") +
   "\nglobalThis.engine = {loadModel, taskMessages, tokenSuggestions};", ctx);
 const {loadModel, taskMessages, tokenSuggestions} = ctx.engine;
 

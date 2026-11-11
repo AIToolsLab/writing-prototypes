@@ -5,7 +5,9 @@ const $ = id => document.getElementById(id);
 const ALT_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌥" : "Alt+";
 const SEND_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘↵" : "Ctrl+↵";
 
-const ENGINES = {tokens: tokensEngine, structured: structuredEngine, trie: trieEngine};
+const ENGINES = {tokens: tokensEngine, structured: structuredEngine};
+// Old names in shared links. "trie" was our engine before it took over the name "tokens".
+const ENGINE_ALIASES = {trie: "tokens"};
 
 const REWRITE_ADJECTIVES = [
   "clear and concise", "more detailed and engaging", "more formal and professional",
@@ -49,7 +51,8 @@ function readHash() {
   const params = new URLSearchParams(location.hash.slice(1));
   if (["highlights", "predict"].includes(params.get("mode"))) state.mode = params.get("mode");
   if (["rewrite", "chat"].includes(params.get("view"))) state.view = params.get("view");
-  if (params.get("engine") in ENGINES) state.engine = params.get("engine");
+  const name = ENGINE_ALIASES[params.get("engine")] ?? params.get("engine");
+  if (name in ENGINES) state.engine = name;
 }
 
 function writeHash() {
@@ -77,6 +80,7 @@ function layout() {
 
   setText("engine-note", engine().name !== state.engine ? "(conversations use Tokens)" : "");
   setText("server", engine().server);
+  $("chat-settings").hidden = state.engine !== "structured";
   hideTooltip();
   writeHash();
   for (const ta of document.querySelectorAll("textarea.editor")) autogrow(ta);
@@ -119,7 +123,7 @@ function updater({key, run, delay, statusId}) {
 }
 
 const updateHighlights = updater({
-  key: () => JSON.stringify([engine().name, state.instruction, $("doc").value]),
+  key: () => JSON.stringify([engine().name, engine().variant?.(), state.instruction, $("doc").value]),
   delay: () => engine().highlightDelay,
   statusId: "highlights-status",
   run: async signal => {
@@ -140,7 +144,7 @@ const updateHighlights = updater({
 });
 
 const updateSuggestions = updater({
-  key: () => JSON.stringify([engine().name, currentMessages(), $("words").value]),
+  key: () => JSON.stringify([engine().name, engine().variant?.(), currentMessages(), $("words").value]),
   delay: () => engine().suggestDelay ?? 150,
   statusId: "predict-status",
   run: async signal => {
@@ -167,7 +171,7 @@ function update() {
     else updateSuggestions();
   }, err => {
     if (current !== engine()) return;
-    setText(state.mode === "highlights" ? "highlights-status" : "predict-status", `Error: can't reach ${current.server} (${err.message})`);
+    setText(state.mode === "highlights" ? "highlights-status" : "predict-status", `Error: can't use ${current.server}: ${err.message}`);
   });
 }
 
@@ -422,9 +426,44 @@ for (const tab of document.querySelectorAll(".tabs button")) {
 }
 $("engine").addEventListener("change", e => {
   state.engine = e.target.value;
+  if (state.engine === "structured") refreshChatModels();
   state.highlights = {text: "", ranges: []};
   state.suggestions = {draft: null, items: []};
   for (const id of ["highlights-status", "highlights-warning", "predict-status", "predict-warning"]) setText(id, "");
+  renderHighlights();
+  layout();
+});
+
+// The Structured engine's server: its API key, and a model picked from those the key can use.
+function chatSetup() {
+  $("chat-key").value = chatSettings.key;
+  $("chat-key").placeholder = CHAT_URL.startsWith(CHAT_KEY_HOME) ? "Calvin API key" : "API key";
+  if (CHAT_URL.startsWith(CHAT_KEY_HOME)) {
+    $("chat-key-hint").innerHTML = `from <a href="${CHAT_KEY_HOME}" target="_blank">${new URL(CHAT_KEY_HOME).host}</a> → Settings → Account`;
+  }
+  showChatModels([]);
+}
+
+function showChatModels(models) {
+  const select = $("chat-model");
+  const options = models.includes(chatSettings.model) ? models : [chatSettings.model, ...models];
+  select.replaceChildren(...options.map(id => new Option(id, id)));
+  select.value = chatSettings.model;
+}
+
+function refreshChatModels() {
+  structuredEngine.ready().then(showChatModels, () => {});
+}
+
+$("chat-key").addEventListener("change", e => {
+  chatSettings.key = e.target.value;
+  refreshChatModels();
+  update();
+});
+$("chat-model").addEventListener("change", e => {
+  chatSettings.model = e.target.value;
+  state.highlights = {text: "", ranges: []};
+  state.suggestions = {draft: null, items: []};
   renderHighlights();
   layout();
 });
@@ -480,5 +519,7 @@ setText("keys-hint", `${ALT_KEY}1–${ALT_KEY}${NUM_SUGGESTIONS} picks a suggest
 setText("send-key", SEND_KEY);
 setInstruction(state.instruction);
 $("engine").value = state.engine;
+chatSetup();
+if (state.engine === "structured") refreshChatModels();
 layout();
 renderChat();

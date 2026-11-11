@@ -19,14 +19,14 @@ codebase is fully ours to change.
   `4ca7207`. See "Docker" in `engine/README.md`.
 - **vLLM is stopped** (`~/vllm-server`, Docker Compose, port 52408, public as vllm.thoughtful-ai.com). The two
   don't fit on the RTX 4090 together. Ken said on 2026-11-11 that nobody is using vLLM right now and stopping it
-  is fine; the public page's default "Tokens" engine is down while it's stopped. Swap back with
+  is fine; on 2026-11-11 the page dropped its vLLM engine: "Tokens" now means our engine (formerly "Trie"), served publicly as llm.thoughtful-ai.com via Caddy, and "Structured" uses the campus server with each person's own API key. Swap back with
   `docker compose stop` in `engine/`, then `docker compose start vllm` in `~/vllm-server`. Both are
   `unless-stopped`, so whichever was stopped by hand stays stopped across reboots.
 - **Verified:** 11 of 11 token-healing cases (`node experiments/token-healing/trie_check.mjs`); typing latency
   (`python3 engine/bench/typing_sim.py`); several writers at once, including moving sessions to host memory and
   back (`python3 engine/bench/sessions_check.py`); both page modes render results in headless Firefox (checked
   before sessions were added, not since).
-- **Not verified:** the conversation view and accepting suggestions (click or Alt+digit) with the Trie engine.
+- **Not verified:** the conversation view and accepting suggestions (click or Alt+digit) with the Tokens (formerly Trie) engine.
 
 ## Done: Dockerize the engine (2026-11-11)
 

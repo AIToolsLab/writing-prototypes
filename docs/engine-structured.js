@@ -1,15 +1,28 @@
-// Structured engine: uses ordinary chat completions, asking the model to *describe* its edits or
-// suggestions as JSON (schema-constrained). Prompts put stable content first and the changing
-// draft last so vLLM's prefix cache can reuse work. Same interface as engine-tokens.js.
+// Structured engine: uses ordinary chat completions on any OpenAI-style server (see llm.js), asking
+// the model to *describe* its edits or suggestions as JSON (schema-constrained). Prompts put stable
+// content first and the changing draft last so the server's prefix cache can reuse work. Same
+// interface as engine-tokens.js.
 
 const structuredEngine = {
   name: "structured",
-  server: BASE_URL,
-  ready: once(loadModel),
+  server: CHAT_URL,
+  ready: () => chatModels(),
+  variant: () => chatSettings.model,  // results depend on the model, too
   highlightDelay: 800,
   highlights: structuredHighlights,
   suggest: structuredSuggestions,
 };
+
+// The server's models, listed once per API key.
+let modelsFor = null, modelsPromise = null;
+function chatModels() {
+  if (modelsFor !== chatSettings.key) {
+    modelsFor = chatSettings.key;
+    modelsPromise = listChatModels();
+    modelsPromise.catch(() => { if (modelsFor === chatSettings.key) modelsFor = null; });
+  }
+  return modelsPromise;
+}
 
 // ── Edits ──────────────────────────────────────────────────────────────────
 
@@ -44,7 +57,7 @@ async function structuredHighlights({instruction, doc}, signal) {
   const missing = result.edits.length - ranges.length;
   return {
     ranges,
-    status: `${ranges.length} edits in ${Math.round(performance.now() - t0)} ms (${usage.completion_tokens} tokens generated)` +
+    status: `${ranges.length} edits in ${Math.round(performance.now() - t0)} ms${generated(usage)}` +
       (missing ? `; ${missing} quote(s) not found in the document` : ""),
   };
 }
@@ -86,7 +99,7 @@ async function structuredSuggestions({messages, words}, signal) {
   ], SUGGEST_SCHEMA, {maxTokens: 100, signal});
   return {
     suggestions: result.suggestions.slice(0, 5).map(phrase => ({text: spacedPhrase(draft, phrase)})),
-    status: `Suggested in ${Math.round(performance.now() - t0)} ms (${usage.completion_tokens} tokens generated)`,
+    status: `Suggested in ${Math.round(performance.now() - t0)} ms${generated(usage)}`,
   };
 }
 
@@ -96,4 +109,8 @@ function spacedPhrase(draft, phrase) {
   phrase = phrase.replace(/^ +/, "");
   const needsSpace = draft && !/\s$/.test(draft) && !/^[.,;:!?)'’"]/.test(phrase);
   return (needsSpace ? " " : "") + phrase;
+}
+
+function generated(usage) {
+  return usage?.completion_tokens ? ` (${usage.completion_tokens} tokens generated)` : "";
 }

@@ -40,6 +40,8 @@ header h1 { font-size: 1.2rem; margin: 0.75rem 0; }
 .tabs button:hover { color: #222; }
 .tabs button[aria-selected=true] { color: #222; font-weight: 600; border-bottom-color: var(--accent); }
 header .engine { margin: 0 0 0.6rem auto; font-size: 0.85rem; }
+#chat-settings { flex-basis: 100%; display: flex; justify-content: flex-end; align-items: center; margin-bottom: 0.6rem; font-size: 0.85rem; }
+#chat-settings label.inline { margin-right: 1rem; }
 
 label { display: block; font-weight: 600; margin: 0.75rem 0 0.35rem; }
 label.inline { display: inline-flex; align-items: center; gap: 0.35rem; font-weight: normal; margin: 0 1.25rem 0 0; }

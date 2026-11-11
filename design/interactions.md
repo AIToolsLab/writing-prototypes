@@ -22,7 +22,7 @@ Assignment (the prompt): *Write a 500-word op-ed for the campus paper about a ch
 
 For features 1, 2, and 5, the cursor is at the end of P1 and P2 doesn't exist yet.
 
-Prompt layout used throughout (what the Trie client does today): the assignment is the user turn; the draft
+Prompt layout used throughout (what the Tokens client, formerly Trie, does today): the assignment is the user turn; the draft
 is the assistant turn.
 
 ```

@@ -13,15 +13,19 @@
     <button role="tab" data-mode="highlights">🖍️ Highlights</button>
     <button role="tab" data-mode="predict">📝 Predictive text</button>
   </nav>
-  <label class="inline engine" title="How we get the model's opinion. Tokens reads next-token probabilities from a vLLM server; Structured asks the model, via chat, to describe edits or suggestions as JSON; Trie asks our own inference server (engine/), which is faster and conditions on the characters you typed.">
+  <label class="inline engine" title="How we get the model's opinion. Tokens reads the probabilities of what comes next from our own inference server (engine/), conditioned on the characters you typed. Structured asks a chat model to describe edits or suggestions as JSON.">
     Engine
     <select id="engine">
       <option value="tokens">Tokens</option>
       <option value="structured">Structured</option>
-      <option value="trie">Trie (our engine)</option>
     </select>
     <span id="engine-note" class="hint"></span>
   </label>
+  <span id="chat-settings" class="inline">
+    <label class="inline">Model <select id="chat-model"></select></label>
+    <label class="inline">API key <input type="password" id="chat-key" autocomplete="off" size="14"></label>
+    <span class="hint" id="chat-key-hint"></span>
+  </span>
 </header>
 
 <section id="prompt-section">
@@ -101,7 +105,8 @@
 <footer>
   <p>by <a href="https://kenarnold.org">Ken Arnold</a> and the <a href="https://thoughtful-ai.com/">Thoughtful AI Tools Lab</a> at Calvin University.
   This page sends your text to <code id="server"></code>, which may log requests; don't use sensitive information.
-  Add <code>?server=https://your-vllm-host</code> to the URL to use a different vLLM server, or <code>?engine-server=…</code> for a different Trie engine server.</p>
+  Add <code>?engine-server=…</code> to the URL to use a different server for the Tokens engine, or <code>?chat-server=…</code> (an OpenAI-style base URL) for Structured.
+  Your API key stays in this browser and is sent only to the Structured engine's server.</p>
 </footer>
 
 <div id="tooltip" hidden></div>
@@ -109,7 +114,6 @@
 <script src="llm.js"></script>
 <script src="engine-tokens.js"></script>
 <script src="engine-structured.js"></script>
-<script src="engine-trie.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

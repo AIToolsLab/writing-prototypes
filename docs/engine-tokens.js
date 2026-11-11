@@ -1,204 +1,160 @@
-// Token-level engine: reads the model's next-token log-probabilities directly.
+// Tokens engine: reads the model's probabilities from our own inference server (engine/server.cpp).
+// (Until 2026-11 this was the "Trie" engine, and "Tokens" read them from vLLM.)
+//
+// The server answers in characters, not tokens: given the prompt and the draft, it returns likely
+// continuations with the model's probability of each, conditioned on the draft's *characters*
+// (summed over the ways they could be tokenized). So there's no token healing here. This file
+// only groups those continuations into the units we show (words), and narrows the last answer
+// locally while the next one is on its way.
 //
 // Both engines have the same interface:
 //   highlights({instruction, doc}, signal) → {ranges: [{start, end, alternative, score?, detail}], status, warning?}
 //   suggest({messages, words, onUpdate}, signal) → {suggestions: [{text, prob?}], status, warning?}
 // where `messages` ends with the message being written, and each suggestion's text is to be
-// appended to that message as-is.
+// appended to that message as-is. Uses helpers from llm.js.
+
+const ENGINE_URL = new URLSearchParams(location.search).get("engine-server") || "https://llm.thoughtful-ai.com";
+
+// Names this page's cache on the server, so several people can write at once without sharing one.
+const SESSION = globalThis.crypto?.randomUUID?.() ?? String(Math.random()).slice(2);
 
 const tokensEngine = {
   name: "tokens",
-  server: BASE_URL,
-  ready: once(loadModel),
+  server: ENGINE_URL,
   highlightDelay: 150,
+  suggestDelay: 0,  // the server drops requests that a newer one supersedes
+  ready: once(async () => {
+    const res = await fetch(ENGINE_URL + "/v1/models");
+    if (!res.ok) throw new Error(`Listing models failed: ${res.status}`);
+  }),
   highlights: tokenHighlights,
   suggest: tokenSuggestions,
 };
 
+async function enginePost(path, body, signal) {
+  const res = await fetch(ENGINE_URL + path, {
+    method: "POST",
+    headers: {"Content-Type": "text/plain"},  // a "simple" request, so no CORS preflight per keystroke
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (res.status === 409) throw new DOMException("superseded", "AbortError");
+  if (!res.ok) throw new Error(`${path}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
+// The chat-templated prompt up to where `role`'s message starts, after `history`.
+function enginePrefix(history, role) {
+  return cached(JSON.stringify(["engine", role, history]), async () => {
+    if (role === "assistant") return (await enginePost("/v1/template", {messages: history, add_generation_prompt: true})).prompt;
+    // There's no generation prompt for a user turn, so render the turn with a placeholder and cut there.
+    const {prompt} = await enginePost("/v1/template", {messages: [...history, {role, content: PLACEHOLDER}], add_generation_prompt: false});
+    const cut = prompt.lastIndexOf(PLACEHOLDER);
+    if (cut === -1) throw new Error("Couldn't find the start of the message in the chat template");
+    return prompt.slice(0, cut);
+  });
+}
+
 // ── Highlights ─────────────────────────────────────────────────────────────
 
-// Treat the document itself as the assistant's response, and mark tokens where the model's top
-// choice differs, scored by how much more likely that choice was.
 async function tokenHighlights({instruction, doc}, signal) {
   const t0 = performance.now();
-  const prefix = await chatPrefix(taskMessages(instruction, doc));
-  const res = await completions({prompt: prefix.text + doc, max_tokens: 1, prompt_logprobs: 5, return_token_ids: true}, signal);
-  const {prompt_logprobs: promptLogprobs, prompt_token_ids: promptIds} = res.choices[0];
-
-  // prompt_logprobs[i] is the distribution at position i, keyed by token id; it always
-  // includes the actual token, plus the top-k (rank 1 is the model's top choice).
+  const prompt = await enginePrefix(taskMessages(instruction, doc), "assistant");
+  const {tokens, stats} = await enginePost("/v1/score", {session: SESSION, prompt, text: doc}, signal);
   const ranges = [];
   let pos = 0;
-  const docIds = promptIds.slice(prefix.ids.length);
-  docIds.forEach((id, j) => {
-    const dist = promptLogprobs[prefix.ids.length + j];
-    const actual = dist[String(id)];
-    const top = Object.values(dist).find(e => e.rank === 1);
-    const text = actual.decoded_token;
+  for (const {text, logprob, top, top_logprob} of tokens) {
     const start = pos;
     pos += text.length;
-    const gap = top.logprob - actual.logprob;  // 0 when the actual token is the top choice
-    if (gap <= 0) return;
-    // Don't highlight the space before a word; it reads as highlighting the gap between words.
+    const gap = top_logprob - logprob;  // 0 when the document's token was the model's top choice
+    if (gap <= 0) continue;
     const lead = text.length - text.trimStart().length;
     const ratio = Math.exp(gap);
     ranges.push({
       start: lead < text.length ? start + lead : start,
       end: pos,
-      alternative: top.decoded_token,
+      alternative: top,
       score: gap,
       detail: `${ratio < 10 ? ratio.toFixed(1) : Math.round(ratio)}× more likely`,
     });
-  });
-  // Tokens that split a multi-byte character decode to replacement characters, which throws off
-  // our character offsets.
-  const warning = pos === doc.length ? "" :
-    "The tokens don't line up with the document's characters (probably non-ASCII text), so highlights may be misplaced.";
-  return {ranges, warning, status: `Scored ${docIds.length} tokens in ${Math.round(performance.now() - t0)} ms`};
+  }
+  const warning = pos === doc.length ? "" : "The scored text doesn't line up with the document, so highlights may be misplaced.";
+  return {ranges, warning, status: `Scored ${stats.text_tokens} tokens in ${Math.round(performance.now() - t0)} ms`};
 }
 
 // ── Predictions ────────────────────────────────────────────────────────────
 
-const NUM_SUGGESTIONS = 5;
+// Scripts written without spaces between words. For these we find words with the browser's
+// segmenter, and ask the server for a few characters rather than "up to the next space".
+const NO_SPACE_SCRIPT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
+const segmenter = typeof Intl !== "undefined" && Intl.Segmenter ? new Intl.Segmenter(undefined, {granularity: "word"}) : null;
 
-// Qwen3.5's pre-tokenizer split (transformers tokenization_qwen3_5.py), with the (?i:...)
-// group expanded because not all browsers support inline modifiers. BPE merges never cross
-// these boundaries, so typing more text can only change the tokens of the last chunk.
-const PRETOKENIZE_REGEX = /'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD]|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu;
-
-// Split text into [everything before the last pre-token chunk, the last chunk].
-function splitLastPretoken(text) {
-  let start = text.length;
-  for (const match of text.matchAll(PRETOKENIZE_REGEX)) start = match.index;
-  return [text.slice(0, start), text.slice(start)];
+// The first n words of a continuation, and whether we've seen enough text after them to know they're whole.
+function firstUnits(text, n) {
+  if (!segmenter || !NO_SPACE_SCRIPT.test(text)) {
+    const whole = completeWords(text, n);
+    return whole === null ? {text: firstWords(text, n), complete: false} : {text: whole, complete: true};
+  }
+  // A unit is a word plus any punctuation after it; it ends at whitespace or where the next word starts.
+  const segments = [...segmenter.segment(text)];
+  let count = 0, end = 0, i = 0;
+  for (; i < segments.length; i++) {
+    const {segment, isWordLike} = segments[i];
+    if (count === n && (isWordLike || /\s/.test(segment))) break;
+    if (isWordLike) count++;
+    end = segments[i].index + segment.length;
+  }
+  // The last segment may be a word that's still growing, so it doesn't confirm that the unit ended.
+  const complete = count === n && (i < segments.length - 1 || (i < segments.length && /\s/.test(segments[i].segment)));
+  return {text: text.slice(0, end), complete};
 }
 
-// Constrain generation to output that starts with `text`.
-function startsWith(text) {
-  const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return {structured_outputs: {regex: escaped + "[\\s\\S]*"}};
+// Group continuations by the unit they start with, adding up their probabilities. A unit's total is
+// a lower bound: continuations the server didn't follow (too unlikely) aren't counted.
+function unitSuggestions(continuations, words) {
+  const units = new Map();
+  for (const {text, prob} of continuations) {
+    const unit = firstUnits(text, words);
+    if (!unit.text.trim()) continue;  // ending the message here isn't a suggestion
+    units.set(unit.text, (units.get(unit.text) ?? 0) + prob);
+  }
+  // Under half a percent is noise: mostly words the server stopped following partway.
+  return [...units].map(([text, prob]) => ({text, prob})).filter(u => u.prob >= 0.005)
+    .sort((a, b) => b.prob - a.prob).slice(0, NUM_SUGGESTIONS);
 }
+
+// The continuations that are still possible after typing `extra` more characters. Their new
+// probabilities are lower bounds: continuations we never saw might match `extra` too.
+function narrow({continuations}, extra) {
+  const matching = continuations.filter(c => c.text.length > extra.length && c.text.startsWith(extra));
+  const seen = continuations.reduce((sum, c) => sum + c.prob, 0);
+  const total = matching.reduce((sum, c) => sum + c.prob, 0) + Math.max(0, 1 - seen);
+  return matching.map(c => ({...c, text: c.text.slice(extra.length), prob: c.prob / total}));
+}
+
+let lastAnswer = null;  // {prompt, words, draft, continuations}
 
 async function tokenSuggestions({messages, words, onUpdate}, signal) {
-  // If the draft ends partway through a token (e.g. "Use de" = "Use" + "Ġde", where "deep"
-  // would be the single token "Ġdeep"), the model infers the word *isn't* one that has a longer
-  // token, and predicts "depleting". So back up to the last pre-token boundary, which every
-  // tokenization of the full text shares, and constrain the output to start with the text we
-  // backed over. The model then picks its own tokenization (e.g. "Ġdeep").
   const {role, content: draft} = messages.at(-1);
-  const [base, typed] = splitLastPretoken(draft);
   const t0 = performance.now();
-  const [prefix, logitBias] = await Promise.all([turnPrefix(messages.slice(0, -1), role), noEndBias()]);
-  const prompt = prefix.text + base;
+  const prompt = await enginePrefix(messages.slice(0, -1), role);
 
-  // Request 1: short greedy paths ("spines") with the top alternatives at each step. Each
-  // alternative starts a branch, scored by its whole path's probability. Looking past the first
-  // step matters when the typed text fixes the first token (e.g. typed " learning"): the choices
-  // then come from the step after. Two spines, in parallel:
-  // - healed: from the boundary, constrained to start with the typed text, for when it ends
-  //   mid-word. The constraint fixes the text, not its tokenization, so greedy can wander off the
-  //   usual tokenization: for "Used" it picks "Use" (heading for "Use deep learning…"), then
-  //   "deep" to supply the "d". Such paths get low scores, since logprobs are the model's raw
-  //   ones, from before the constraint (this needs a patched vLLM; stock vLLM reports them after
-  //   the grammar mask, which makes the wandering paths look certain).
-  // - unhealed: from the end of the typed text, for when it ends at a token boundary ("Used" →
-  //   " ethically"). Its prompt logprobs give the probability of the typed tokens, so its
-  //   branches' probabilities are also of the whole path from the boundary, and comparable.
-  // See experiments/token-healing for the alternatives we tried.
-  const spineParams = {logprobs: 20, temperature: 0, logit_bias: logitBias, return_token_ids: true};
-  const [unhealedRes, healedRes] = await Promise.all([
-    completions({prompt: prefix.text + draft, max_tokens: 3, prompt_logprobs: 1, ...spineParams}, signal),
-    typed && completions({prompt, max_tokens: 3 + Math.ceil(typed.length / 4), ...spineParams, ...startsWith(typed)}, signal),
-  ]);
-  const unhealed = unhealedRes.choices[0];
-  // The draft's tokens are only for checking our pre-tokenizer split.
-  const baseIds = typed ? healedRes.choices[0].prompt_token_ids : unhealed.prompt_token_ids;
-  const warning = boundaryWarning(baseIds, unhealed.prompt_token_ids, base) ||
-    (!typed || healedRes.choices[0].text.startsWith(typed) ? "" : "The server ignored the constraint to continue the partial word, so predictions may be missing.");
-  const typedLogprob = unhealed.prompt_token_ids.slice(baseIds.length)
-    .reduce((sum, id, j) => sum + unhealed.prompt_logprobs[baseIds.length + j][String(id)].logprob, 0);
-  let branches = spineBranches(unhealed.logprobs, typed, typed, typedLogprob);
-  if (typed) branches.push(...spineBranches(healedRes.choices[0].logprobs, typed, "", 0));
-  branches.sort((a, b) => b.prob - a.prob);
-  // The spines overlap when the typed text is a whole token (e.g. " is").
-  branches = branches.filter((b, i) => branches.findIndex(c => c.forced === b.forced) === i);
-
-  // Branches that already contain the words we'll show are final; keep the most probable one per
-  // shown text (e.g. " deep learning" and " deep neural" both show as "ep" after typed " de").
-  // The rest end mid-word and may still grow into something distinct.
-  const shown = new Set();
-  branches = branches.filter(b => {
-    b.final = completeWords(b.forced.slice(typed.length), words);
-    if (b.final === null) return true;
-    if (shown.has(b.final)) return false;
-    shown.add(b.final);
-    return true;
-  }).slice(0, NUM_SUGGESTIONS + 2);  // a little extra, since extended branches may turn out to be duplicates
-  const toSuggestions = () => uniqueSuggestions(branches.map(b => ({
-    text: b.final ?? firstWords(b.forced.slice(typed.length), words),
-    prob: b.prob,
-  })));
-  // Show the branches right away; the lookahead below finishes their words.
-  onUpdate(toSuggestions());
-
-  // Request 2 (if needed): extend the unfinished branches greedily, in one batch, so we can cut
-  // them at a word boundary. Each branch already contains the typed text, so no constraint.
-  // (On our server, decoding gets slower per step as the batch grows, so extend as few as we can.)
-  const unfinished = branches.filter(b => b.final === null);
-  if (unfinished.length > 0) {
-    const extRes = await completions({
-      prompt: unfinished.map(b => prompt + b.forced),
-      max_tokens: 2 * words,
-      temperature: 0,
-      logit_bias: logitBias,
-    }, signal);
-    for (const choice of extRes.choices) {
-      const b = unfinished[choice.index];
-      b.final = firstWords((b.forced + choice.text).slice(typed.length), words);
-    }
+  // Until the server answers, show what the last answer implies for the characters typed since.
+  const last = lastAnswer;
+  if (last && last.prompt === prompt && last.words === words && draft.length > last.draft.length && draft.startsWith(last.draft)) {
+    const local = unitSuggestions(narrow(last, draft.slice(last.draft.length)), words);
+    if (local.length) onUpdate(local);
   }
-  return {suggestions: toSuggestions(), warning, status: `Predicted in ${Math.round(performance.now() - t0)} ms`};
-}
 
-// Branches off a spine: each top alternative at each step, appended to the spine's path so far
-// (which starts as pathText, with log-probability pathLogprob). Only branches that get past the
-// typed text to something visible are suggestions.
-function spineBranches({tokens, token_logprobs, top_logprobs}, typed, pathText, pathLogprob) {
-  const branches = [];
-  for (let j = 0; j < tokens.length; j++) {
-    for (const [tok, logprob] of Object.entries(top_logprobs[j])) {
-      const forced = pathText + tok;
-      if (isSpecialToken(tok) || !forced.startsWith(typed) || !forced.slice(typed.length).trim()) continue;
-      branches.push({forced, prob: Math.exp(pathLogprob + logprob)});
-    }
-    pathText += tokens[j];
-    pathLogprob += token_logprobs[j];
-  }
-  return branches;
-}
-
-// If our pre-tokenizer split matches the server's, the tokens of `base` are a prefix of the
-// tokens of the whole draft. Warn if not.
-function boundaryWarning(baseIds, draftIds, base) {
-  if (baseIds.every((id, i) => id === draftIds[i])) return "";
-  return `Tokenization warning: the draft's tokens don't start with the tokens of ${JSON.stringify(base.slice(-20))}, ` +
-    `so this page's pre-tokenizer split doesn't match the server's. Mid-word predictions may be off.`;
-}
-
-// The first n words of text, if text already contains them followed by whitespace; else null.
-function completeWords(text, n) {
-  const match = text.match(new RegExp(`^\\s*\\S+(?:[ \\t]+\\S+){${n - 1}}(?=\\s)`));
-  return match ? match[0] : null;
-}
-
-function uniqueSuggestions(suggestions) {
-  return suggestions
-    .filter((s, i) => s.text.trim() && suggestions.findIndex(t => t.text === s.text) === i)
-    .slice(0, NUM_SUGGESTIONS);
-}
-
-// Leading whitespace plus the first n whitespace-delimited words.
-function firstWords(text, n) {
-  const match = text.match(new RegExp(`^\\s*\\S+(?:[ \\t]+\\S+){0,${n - 1}}`));
-  return match ? match[0] : text;
+  const body = {session: SESSION, prompt, text: draft, stop: `^\\s*\\S+(?:[ \\t]+\\S+){${words - 1}}(?=\\s)`};
+  if (NO_SPACE_SCRIPT.test((messages.map(m => m.content).join("\n")).slice(-200))) body.max_chars = 4 * words + 2;
+  const res = await enginePost("/v1/continuations", body, signal);
+  lastAnswer = {prompt, words, draft, continuations: res.continuations};
+  const {stats} = res;
+  return {
+    suggestions: unitSuggestions(res.continuations, words),
+    warning: res.unresolved > 0.05 ? "Some ways of reading the last word weren't explored, so probabilities may be a little high." : "",
+    status: `Predicted in ${Math.round(performance.now() - t0)} ms ` +
+      `(server ${Math.round(stats.total_ms)} ms: ${stats.decoded_tokens} new tokens, ${stats.rounds} search steps)`,
+  };
 }

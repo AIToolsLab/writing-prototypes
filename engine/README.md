@@ -2,7 +2,7 @@
 
 A small inference server for the writing prototypes, built on [llama.cpp](https://github.com/ggml-org/llama.cpp)'s
 library. It answers one question quickly and honestly: *given this context and the characters typed so far, what
-characters are likely to come next?* The page uses it through the "Trie" engine (`docs/engine-trie.js`).
+characters are likely to come next?* The page uses it through the "Tokens" engine (`docs/engine-tokens.js`; called "Trie" before 2026-11-11).
 
 ## Build and run
 
@@ -13,7 +13,7 @@ cmake --build build
 ```
 
 Options: `--host`, `--port`, `--ctx` (context tokens, default 16384), `--seqs` (default 24), `--gpu-layers`.
-Then open the page with `#engine=trie` (add `?engine-server=http://host:port` if it isn't on localhost:52409).
+The page uses https://llm.thoughtful-ai.com (Caddy, proxying to localhost:52409) by default; add `?engine-server=http://localhost:52409` to use a local one directly.
 
 On the RTX 4090, Qwen3.8-27B (Q4_K_XL) takes about 21 GB with the defaults, so it can't run alongside the vLLM
 server (`docker compose stop vllm` in `~/vllm-server` first). Qwen3.8's recurrent layers cost about 150 MB of

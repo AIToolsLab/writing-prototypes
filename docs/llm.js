@@ -1,31 +1,78 @@
-// Thin client for a stock vLLM server (OpenAI-compatible API plus /tokenize).
-// Shared by both engines.
+// Helpers shared by both engines, and a small client for an OpenAI-style chat server
+// (the Structured engine's). By default that's Calvin's Open WebUI, which needs each
+// person's own API key; the key is kept in this browser's localStorage and sent only there.
 
-const BASE_URL = new URLSearchParams(location.search).get("server") || "https://vllm.thoughtful-ai.com";
-let MODEL = null;
+const CHAT_URL = new URLSearchParams(location.search).get("chat-server") || "https://localai.calvin.edu/api";
+const CHAT_KEY_HOME = "https://localai.calvin.edu";  // where to get a key for the default server
+const DEFAULT_CHAT_MODEL = "nvidia-qwen3-6-35b-a3b-nvfp4";  // about 0.5 s per suggestion in 2026-11
 
-// Thinking off: we want the model's direct response, and the thinking-disabled
-// generation prompt ends in "<think>\n\n</think>\n\n" with no surprises after it.
+const chatSettings = {
+  get key() { return localStorage.getItem("chat-api-key") ?? ""; },
+  set key(value) { localStorage.setItem("chat-api-key", value.trim()); },
+  get model() { return localStorage.getItem("chat-model") || DEFAULT_CHAT_MODEL; },
+  set model(value) { localStorage.setItem("chat-model", value); },
+};
+
+// Thinking off: we want the model's direct response.
 const CHAT_TEMPLATE_KWARGS = {enable_thinking: false};
 
-async function post(path, body, signal) {
-  const res = await fetch(BASE_URL + path, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(body),
-    signal,
+function chatFetch(path, init = {}) {
+  return fetch(CHAT_URL + path, {
+    ...init,
+    headers: {...init.headers, "Authorization": `Bearer ${chatSettings.key}`},
   });
-  if (!res.ok) throw new Error(`${path}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
-  return res.json();
 }
 
-async function loadModel() {
-  if (MODEL) return MODEL;
-  const res = await fetch(BASE_URL + "/v1/models");
-  if (!res.ok) throw new Error(`Listing models failed: ${res.status}`);
-  MODEL = (await res.json()).data[0].id;
-  return MODEL;
+// The ids of the server's models. Throws a readable error if there's no key or it's refused.
+async function listChatModels() {
+  if (!chatSettings.key) throw new Error("this engine needs an API key; paste one above");
+  const res = await chatFetch("/models");
+  if (res.status === 401 || res.status === 403) throw new Error("the server refused the API key");
+  if (!res.ok) throw new Error(`listing models failed: HTTP ${res.status}`);
+  return (await res.json()).data.map(m => m.id);
 }
+
+// Chat completion constrained to a JSON schema; returns the parsed object.
+async function chatJSON(messages, schema, {maxTokens = 400, signal} = {}) {
+  const res = await chatFetch("/chat/completions", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      model: chatSettings.model,
+      messages,
+      stream: false,
+      temperature: 0,
+      max_tokens: maxTokens,
+      response_format: {type: "json_schema", json_schema: {name: "result", schema}},
+      chat_template_kwargs: CHAT_TEMPLATE_KWARGS,
+    }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`chat: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+  const {content, usage} = await readChat(res);
+  return {result: JSON.parse(content), usage};
+}
+
+// Open WebUI streams even when asked not to, so accept either a JSON body or server-sent events.
+async function readChat(res) {
+  const body = await res.text();
+  if (!body.startsWith("data:")) {
+    const data = JSON.parse(body);
+    return {content: data.choices[0].message.content, usage: data.usage};
+  }
+  let content = "", usage;
+  for (const line of body.split("\n")) {
+    if (!line.startsWith("data: {")) continue;
+    const chunk = JSON.parse(line.slice(6));
+    content += chunk.choices?.[0]?.delta?.content ?? "";
+    usage = chunk.usage ?? usage;
+  }
+  return {content, usage};
+}
+
+// ── Shared helpers ─────────────────────────────────────────────────────────
+
+const NUM_SUGGESTIONS = 5;
 
 // Wrap an async function so it runs once; a failure is forgotten, so the next call retries.
 function once(fn) {
@@ -46,73 +93,24 @@ function cached(key, fn) {
   return prefixCache.get(key);
 }
 
-// The chat-templated prompt for `messages`, ending with the assistant generation prompt,
-// as both token ids and text. We append the response text to `text` ourselves rather than
-// passing it through the chat template, so Jinja can't trim its whitespace. The server parses
-// special-token strings in text prompts, so `text + response` tokenizes the same as the
-// template's ids followed by the response's ids.
-function chatPrefix(messages) {
-  return cached(JSON.stringify(["assistant", messages]), async () => {
-    const {tokens} = await post("/tokenize", {
-      model: MODEL,
-      messages,
-      add_generation_prompt: true,
-      chat_template_kwargs: CHAT_TEMPLATE_KWARGS,
-    });
-    const {prompt} = await post("/detokenize", {model: MODEL, tokens});
-    return {ids: tokens, text: prompt};
-  });
-}
-
-// Like chatPrefix, but for a message from `role` after `history`. There's no generation prompt
-// for a user turn, so render the turn with a placeholder as its content and cut there.
+// Stands in for a message's content when rendering a chat template, to find where it starts.
 const PLACEHOLDER = "XYZZYPLACEHOLDER";
-function turnPrefix(history, role) {
-  if (role === "assistant") return chatPrefix(history);
-  return cached(JSON.stringify([role, history]), async () => {
-    const {tokens} = await post("/tokenize", {
-      model: MODEL,
-      messages: [...history, {role, content: PLACEHOLDER}],
-      add_generation_prompt: false,
-      chat_template_kwargs: CHAT_TEMPLATE_KWARGS,
-    });
-    const {prompt} = await post("/detokenize", {model: MODEL, tokens});
-    const cut = prompt.lastIndexOf(PLACEHOLDER);
-    if (cut === -1) throw new Error("Couldn't find the start of the message in the chat template");
-    return {text: prompt.slice(0, cut)};
-  });
-}
-
-// A logit_bias that keeps generation from ending the turn, so lookahead paths don't stop short
-// where ending is likely (e.g. a user turn after a complete word); ending is never a suggestion
-// anyway. The reported logprobs are from before the bias, so they're unaffected.
-function noEndBias() {
-  return cached("noEndBias", async () => {
-    const {tokens} = await post("/tokenize", {model: MODEL, prompt: "<|im_end|><|endoftext|>", add_special_tokens: false});
-    return Object.fromEntries(tokens.map(id => [id, -100]));
-  });
-}
-
-async function completions(body, signal) {
-  return post("/v1/completions", {model: MODEL, ...body}, signal);
-}
-
-// Chat completion constrained to a JSON schema; returns the parsed object.
-async function chatJSON(messages, schema, {maxTokens = 400, signal} = {}) {
-  const data = await post("/v1/chat/completions", {
-    model: MODEL,
-    messages,
-    temperature: 0,
-    max_tokens: maxTokens,
-    response_format: {type: "json_schema", json_schema: {name: "result", schema}},
-    chat_template_kwargs: CHAT_TEMPLATE_KWARGS,
-  }, signal);
-  return {result: JSON.parse(data.choices[0].message.content), usage: data.usage};
-}
 
 // The single-turn conversation for an instruction about a document.
 function taskMessages(instruction, doc) {
   return [{role: "user", content: `${instruction}\n\n${doc}`}];
+}
+
+// The first n words of text, if text already contains them followed by whitespace; else null.
+function completeWords(text, n) {
+  const match = text.match(new RegExp(`^\\s*\\S+(?:[ \\t]+\\S+){${n - 1}}(?=\\s)`));
+  return match ? match[0] : null;
+}
+
+// Leading whitespace plus the first n whitespace-delimited words.
+function firstWords(text, n) {
+  const match = text.match(new RegExp(`^\\s*\\S+(?:[ \\t]+\\S+){0,${n - 1}}`));
+  return match ? match[0] : text;
 }
 
 function isSpecialToken(tok) {
