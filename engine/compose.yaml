@@ -1,0 +1,38 @@
+# The writing engine, auto-started like ~/vllm-server. Both use the one GPU and can't run together; both are
+# `restart: unless-stopped`, so whichever was stopped by hand stays stopped across reboots. To swap:
+#   docker compose stop engine && (cd ~/vllm-server && docker compose start vllm)
+# Weights come from the shared cache; fetch them first with ./download-model.sh if needed.
+services:
+  engine:
+    build: .
+    image: writing-engine
+    container_name: writing-engine
+    restart: unless-stopped
+    ports:
+      # Localhost only: the engine has no authentication.
+      - "127.0.0.1:52409:52409"
+    volumes:
+      - /storage/HuggingFace:/root/.cache/huggingface:ro
+    environment:
+      - MODEL_REPO=${MODEL_REPO:-unsloth/Qwen3.8-27B-GGUF}
+      - MODEL_FILE=${MODEL_FILE:-Qwen3.8-27B-UD-Q4_K_XL.gguf}
+      - MODEL_REVISION=${MODEL_REVISION:-4ca720788d1e01f1bff70c033e0d0028fd02e502}
+    # Extra engine options (--ctx, --seqs, --gpu-layers); see README.
+    command: --alias Qwen3.8-27B
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:52409/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 300s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

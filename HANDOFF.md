@@ -13,32 +13,32 @@ codebase is fully ours to change.
 
 ## State as of this handoff
 
-- **Branch `writing-engine`**, one commit ahead of `main` (the engine, the Trie client, the docs). Per-writer
-  sessions were added after that commit; check `git status` to see whether they've been committed. Not pushed.
-- **The engine is running** on `127.0.0.1:52409` as a bare process (started by hand, won't survive a reboot),
-  serving `/storage/HuggingFace/hub/models--unsloth--Qwen3.8-27B-GGUF/snapshots/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf`.
+- **Branch:** everything is on `main` (the `writing-engine` branch was merged as PR #9).
+- **The engine runs in Docker** (`engine/compose.yaml`, container `writing-engine`, `127.0.0.1:52409`,
+  `restart: unless-stopped`), serving Qwen3.8-27B Q4_K_XL from `/storage/HuggingFace`, pinned to revision
+  `4ca7207`. See "Docker" in `engine/README.md`.
 - **vLLM is stopped** (`~/vllm-server`, Docker Compose, port 52408, public as vllm.thoughtful-ai.com). The two
   don't fit on the RTX 4090 together. Ken said on 2026-11-11 that nobody is using vLLM right now and stopping it
   is fine; the public page's default "Tokens" engine is down while it's stopped. Swap back with
-  `pkill -x writing-engine` then `docker compose start vllm` in `~/vllm-server`.
+  `docker compose stop` in `engine/`, then `docker compose start vllm` in `~/vllm-server`. Both are
+  `unless-stopped`, so whichever was stopped by hand stays stopped across reboots.
 - **Verified:** 11 of 11 token-healing cases (`node experiments/token-healing/trie_check.mjs`); typing latency
   (`python3 engine/bench/typing_sim.py`); several writers at once, including moving sessions to host memory and
   back (`python3 engine/bench/sessions_check.py`); both page modes render results in headless Firefox (checked
   before sessions were added, not since).
 - **Not verified:** the conversation view and accepting suggestions (click or Alt+digit) with the Trie engine.
 
-## Task 1: Dockerize the engine
+## Done: Dockerize the engine (2026-11-11)
 
-So it auto-starts like the vLLM container. Ken considers this trivial. Things that matter:
-
-- `engine/CMakeLists.txt` fetches llama.cpp pinned at `f7b886f` and needs CUDA at build time
-  (`-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89`). The host has CUDA 13.3.
-- Mount `/storage/HuggingFace` for the GGUF. Pass `--host 0.0.0.0` inside the container.
-- It and vLLM can't both hold the GPU. Decide with Ken which one has `restart: unless-stopped`, and what
-  happens to vllm.thoughtful-ai.com and to clients of vLLM (the `lm-internals` course client needs vLLM's
-  prompt logprobs; see `~/vllm-server/BENCHMARKS.md`).
-- The repo root has an untracked, older `Dockerfile` and `docker-compose.yml` from a previous approach; look
-  before overwriting.
+- The image builds against CUDA 13.0.1, not the host's 13.3: the driver (580) supports at most 13.0, and
+  GeForce cards get no forward-compatibility package. No measurable cost (82 ms median keystroke at 3,300
+  tokens, vs 85 ms for the bare build; 11 of 11 token-healing cases).
+- **Unsloth re-uploaded the GGUFs** under the same names (revision `ce331ef`, both Q4_K_XL and Q4_K_M differ).
+  Ken wants to know about revisions but not download them automatically. `engine/check-model-update.sh` compares
+  file hashes and prints a NOTE; it runs from `download-model.sh` and at container start (logs only). Switching
+  means downloading 17 GB, bumping `MODEL_REVISION` in `compose.yaml`, and rerunning the token-healing cases.
+- Not decided: vllm.thoughtful-ai.com and the `lm-internals` client (needs vLLM's prompt logprobs; see
+  `~/vllm-server/BENCHMARKS.md`) are down while the engine holds the GPU.
 
 ## Task 2: New interactions
 
@@ -53,6 +53,8 @@ For revising one's own draft: **the model reads and the human writes.** It score
 no prose.
 
 ### Candidate features
+
+`design/interactions.md` sketches concrete examples of each.
 
 Ken liked all of these in conversation but has chosen none to build first. Ask which. My suggested order is
 the first two, since the engine nearly supports them already.

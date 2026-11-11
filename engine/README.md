@@ -19,6 +19,13 @@ On the RTX 4090, Qwen3.8-27B (Q4_K_XL) takes about 21 GB with the defaults, so i
 server (`docker compose stop vllm` in `~/vllm-server` first). Qwen3.8's recurrent layers cost about 150 MB of
 GPU memory per sequence, which is what limits `--seqs`.
 
+## Docker
+
+`docker compose up -d` here builds and starts the engine on `127.0.0.1:52409`, restarting it unless it's stopped
+by hand. It reads the GGUF from `/storage/HuggingFace`, pinned to a revision in `compose.yaml`;
+`./download-model.sh` fetches it if it's missing. It and vLLM (`~/vllm-server`) can't share the GPU, so stop one
+before starting the other.
+
 ## Why it's fast
 
 One model context stays warm, with a cache for each writer.
