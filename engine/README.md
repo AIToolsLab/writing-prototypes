@@ -134,6 +134,22 @@ chat template.
 
 `GET /health`, `GET /v1/models`, `GET /v1/sessions`.
 
+### vLLM compatibility
+
+For code written against our old vLLM server, the engine also answers vLLM's request and response shapes for:
+
+- `POST /tokenize` `{prompt, add_special_tokens?}` or `{messages, add_generation_prompt?, continue_final_message?,
+  chat_template_kwargs?, return_token_strs?}`. As in vLLM, thinking defaults to on for `messages`; `token_strs` use
+  Hugging Face's byte-level spelling (`Ġis`).
+- `POST /detokenize` `{tokens}`, with special tokens included.
+- `POST /v1/completions` with `prompt` (a string, token ids, or a list of either), `max_tokens`, `n` (up to 8),
+  `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `logprobs` and `prompt_logprobs` (up to 20), `echo`, `stop`,
+  `stop_token_ids`, `include_stop_str_in_output`, `ignore_eos`, `logit_bias`, `return_token_ids`. Logprobs are the
+  model's raw ones, before temperature and bias, as vLLM reports them.
+
+Not supported, and refused with a 400 rather than ignored: constrained decoding (`structured_outputs`, `guided_*`,
+`response_format`), streaming, penalties, `best_of` and beam search. There's no `/v1/chat/completions`.
+
 ## Limits
 
 - Requests run one at a time, so many people typing at once queue behind each other.

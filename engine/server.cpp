@@ -13,7 +13,7 @@
 //   nothing is renormalized over the candidates we happened to keep.
 //
 // Endpoints (JSON): GET /health, GET /v1/models, GET /v1/sessions, POST /v1/template, POST /v1/continuations,
-// POST /v1/score.
+// POST /v1/score; and for code written against vLLM, POST /tokenize, POST /detokenize, POST /v1/completions.
 // Requests run one at a time. Each writer ("session") has its own cache; see Engine for how they share the GPU.
 
 #include "llama.h"
@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <array>
+#include <ctime>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -33,6 +34,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <random>
 #include <regex>
 #include <set>
 #include <string>
@@ -80,6 +82,28 @@ static void parallel_for(size_t n, const std::function<void(size_t)> & fn) {
     std::vector<std::thread> threads;
     for (size_t t = 0; t < n_threads; t++) threads.emplace_back([&] { for (size_t i; (i = next++) < n;) fn(i); });
     for (auto & t : threads) t.join();
+}
+
+// GPT-2's byte-level spelling of raw bytes (" is" → "Ġis"), which Hugging Face tokenizers use for token strings.
+static std::string byte_level(const std::string & bytes) {
+    static const std::array<std::string, 256> table = [] {
+        std::array<std::string, 256> t;
+        auto utf8 = [](int cp) {
+            std::string out;
+            if (cp < 0x80) out += (char) cp;
+            else { out += (char) (0xC0 | (cp >> 6)); out += (char) (0x80 | (cp & 0x3F)); }   // all code points here are < 0x800
+            return out;
+        };
+        int extra = 0;
+        for (int b = 0; b < 256; b++) {
+            bool printable = (b >= 33 && b <= 126) || (b >= 161 && b <= 172) || b >= 174;
+            t[b] = utf8(printable ? b : 256 + extra++);
+        }
+        return t;
+    }();
+    std::string out;
+    for (unsigned char c : bytes) out += table[c];
+    return out;
 }
 
 static double log_sum_exp(const float * logits, int n) {
@@ -199,6 +223,12 @@ struct Engine {
     json score(const json & req);
     json render_template(const json & req);
 
+    // vLLM-compatible requests
+    Tokens tokenize_text(const std::string & text, bool add_special) const;
+    json tokenize_request(const json & req) const;
+    json detokenize_request(const json & req) const;
+    json completions(const json & req);
+    uint64_t completion_count = 0;
 };
 
 void Engine::load(const std::string & path, int ctx_size, int n_gpu_layers, int seqs) {
@@ -1071,6 +1101,234 @@ json Engine::render_template(const json & req) {
     return {{"prompt", apply_template(req.at("messages"), req.value("add_generation_prompt", true), enable_thinking_of(req, false))}};
 }
 
+// ── vLLM compatibility ───────────────────────────────────────────────────────
+//
+// Enough of vLLM's API for code written against our old vLLM server: /tokenize, /detokenize, and /v1/completions
+// with prompt logprobs, echo, and sampled or greedy generation. Logprobs are the model's raw ones, before
+// temperature and logit_bias, as vLLM reports them. Constrained decoding and penalties are refused rather than ignored.
+
+Tokens Engine::tokenize_text(const std::string & text, bool add_special) const {
+    Tokens out;
+    if (add_special && bos != LLAMA_TOKEN_NULL && !starts_with(text, rendered[bos])) out.push_back(bos);
+    Tokens rest = tokenize_raw(text);
+    out.insert(out.end(), rest.begin(), rest.end());
+    return out;
+}
+
+json Engine::tokenize_request(const json & req) const {
+    Tokens tokens;
+    if (req.contains("messages")) {
+        // vLLM's defaults: a generation prompt, and the template's own default for thinking (on, for Qwen).
+        bool cont = req.value("continue_final_message", false), gen = req.value("add_generation_prompt", true);
+        if (cont && gen && req.contains("add_generation_prompt")) throw HttpError{400, "continue_final_message and add_generation_prompt can't both be true"};
+        bool thinking = enable_thinking_of(req, true);
+        json messages = req["messages"];
+        std::string text;
+        if (cont) {
+            if (!messages.is_array() || messages.empty()) throw HttpError{400, "continue_final_message needs a final message"};
+            messages.back()["content"] = content_of(messages.back()) + PLACEHOLDER;
+            text = apply_template(messages, false, thinking);
+            size_t cut = text.rfind(PLACEHOLDER);
+            if (cut == std::string::npos) throw HttpError{500, "the chat template changes message text, so the final message can't be continued"};
+            text.resize(cut);
+        } else text = apply_template(messages, gen, thinking);
+        tokens = tokenize_text(text, req.value("add_special_tokens", false));
+    } else tokens = tokenize_text(req.value("prompt", ""), req.value("add_special_tokens", true));
+    json strs = nullptr;
+    if (req.value("return_token_strs", false)) {
+        strs = json::array();
+        for (llama_token t : tokens) strs.push_back(is_control[t] ? rendered[t] : byte_level(rendered[t]));
+    }
+    return {{"count", tokens.size()}, {"max_model_len", n_ctx}, {"tokens", tokens}, {"token_strs", strs}};
+}
+
+json Engine::detokenize_request(const json & req) const {
+    std::string text;
+    for (const auto & t : req.at("tokens")) {
+        int id = t.get<int>();
+        if (id < 0 || id >= n_vocab) throw HttpError{400, "token id out of range: " + std::to_string(id)};
+        text += rendered[id];
+    }
+    return {{"prompt", text}};
+}
+
+json Engine::completions(const json & req) {
+    auto given = [&](const char * k) { return req.contains(k) && !req[k].is_null(); };
+    for (const char * k : {"structured_outputs", "guided_json", "guided_regex", "guided_choice", "guided_grammar", "response_format", "suffix"})
+        if (given(k)) throw HttpError{400, std::string(k) + " isn't supported by this server (no constrained decoding)"};
+    if (req.value("stream", false)) throw HttpError{400, "stream isn't supported by this server"};
+    if (req.value("use_beam_search", false) || req.value("best_of", 1) > 1) throw HttpError{400, "best_of and beam search aren't supported by this server"};
+    if (req.value("presence_penalty", 0.0) != 0 || req.value("frequency_penalty", 0.0) != 0 || req.value("repetition_penalty", 1.0) != 1)
+        throw HttpError{400, "penalties aren't supported by this server"};
+
+    auto opt_int = [&](const char * k, int fallback) { return given(k) ? req[k].get<int>() : fallback; };
+    int max_tokens = opt_int("max_tokens", 16), n = req.value("n", 1);
+    int logprobs = opt_int("logprobs", -1), prompt_logprobs = opt_int("prompt_logprobs", -1);
+    if (logprobs > 20 || prompt_logprobs > 20) throw HttpError{400, "logprobs and prompt_logprobs can be at most 20"};
+    if (n < 1 || n > 8) throw HttpError{400, "n must be between 1 and 8"};
+    if (max_tokens < 0) throw HttpError{400, "max_tokens can't be negative"};
+    bool echo = req.value("echo", false), ignore_eos = req.value("ignore_eos", false);
+    bool include_stop = req.value("include_stop_str_in_output", false), return_ids = req.value("return_token_ids", false);
+    double temperature = given("temperature") ? req["temperature"].get<double>() : 1.0;
+    double top_p = given("top_p") ? req["top_p"].get<double>() : 1.0, min_p = given("min_p") ? req["min_p"].get<double>() : 0.0;
+    int top_k = opt_int("top_k", 0);
+    std::vector<std::string> stops;
+    if (given("stop")) { if (req["stop"].is_string()) stops.push_back(req["stop"]); else for (const auto & x : req["stop"]) stops.push_back(x); }
+    std::set<llama_token> stop_ids;
+    if (given("stop_token_ids")) for (const auto & x : req["stop_token_ids"]) stop_ids.insert(x.get<int>());
+    std::vector<std::pair<llama_token, float>> bias;
+    if (given("logit_bias")) for (const auto & [id, v] : req["logit_bias"].items()) {
+        int t = std::stoi(id);
+        if (t < 0 || t >= n_vocab) throw HttpError{400, "logit_bias token id out of range: " + id};
+        bias.push_back({t, std::clamp(v.get<float>(), -100.0f, 100.0f)});
+    }
+    std::mt19937_64 rng(given("seed") ? req["seed"].get<uint64_t>() : std::random_device{}());
+
+    // Prompts: a string, a list of token ids, or a list of either.
+    struct Prompt { Tokens tokens; std::string text; };
+    std::vector<Prompt> prompts;
+    auto add_prompt = [&](const json & p) {
+        Prompt out;
+        if (p.is_string()) { out.text = p.get<std::string>(); out.tokens = tokenize_text(out.text, req.value("add_special_tokens", true)); }
+        else {
+            for (const auto & x : p) {
+                int id = x.get<int>();
+                if (id < 0 || id >= n_vocab) throw HttpError{400, "token id out of range: " + std::to_string(id)};
+                out.tokens.push_back(id); out.text += rendered[id];
+            }
+        }
+        if (out.tokens.empty()) throw HttpError{400, "empty prompt"};
+        prompts.push_back(out);
+    };
+    const json & p = req.at("prompt");
+    if (p.is_string() || (p.is_array() && !p.empty() && p[0].is_number_integer())) add_prompt(p);
+    else if (p.is_array() && !p.empty()) for (const auto & x : p) add_prompt(x);
+    else throw HttpError{400, "prompt must be a string, a list of token ids, or a list of those"};
+
+    auto sample = [&](const float * logits) -> llama_token {
+        std::vector<float> v(logits, logits + n_vocab);
+        for (const auto & [t, b] : bias) v[t] += b;
+        if (temperature < 1e-5) return std::max_element(v.begin(), v.end()) - v.begin();
+        float vmax = *std::max_element(v.begin(), v.end());
+        std::vector<std::pair<float, llama_token>> cand;   // (scaled logit, token), dropping what's under e^-30 of the top
+        for (llama_token t = 0; t < n_vocab; t++) if ((v[t] - vmax) / temperature > -30) cand.push_back({(v[t] - vmax) / (float) temperature, t});
+        std::sort(cand.begin(), cand.end(), std::greater<>());
+        if (top_k > 0 && (int) cand.size() > top_k) cand.resize(top_k);
+        std::vector<double> w;
+        double sum = 0;
+        for (const auto & c : cand) { w.push_back(std::exp(c.first)); sum += w.back(); }
+        size_t keep = 0; double acc = 0;
+        for (; keep < w.size(); keep++) {
+            if (keep > 0 && (w[keep] < min_p * w[0] || acc >= top_p * sum)) break;
+            acc += w[keep];
+        }
+        std::discrete_distribution<size_t> pick(w.begin(), w.begin() + keep);
+        return cand[pick(rng)].second;
+    };
+
+    json choices = json::array();
+    size_t prompt_tokens = 0, completion_tokens = 0;
+    auto top_dict = [&](const Scored & sc, llama_token actual) {
+        json d = json::object();
+        for (size_t r = 0; r < sc.top.size() && (int) r < logprobs; r++) d[rendered[sc.top[r].token]] = sc.top[r].logprob;
+        d[rendered[actual]] = sc.logprob;
+        return d;
+    };
+    for (size_t j = 0; j < prompts.size(); j++) {
+        const Tokens & toks = prompts[j].tokens;
+        prompt_tokens += toks.size();
+        if ((int) (toks.size() + (size_t) n * max_tokens) + 64 > n_ctx) throw HttpError{400, "prompt plus n × max_tokens is too long for the context (" + std::to_string(n_ctx) + " tokens)"};
+        use_session(req, prompts[j].text);
+        s->last_text = prompts[j].text; s->last_tokens.clear(); s->last_offsets.clear();
+
+        // The prompt: scored if asked, and in any case left in the session's cache with its next-token logits.
+        int k = std::max({prompt_logprobs, echo ? logprobs : -1, 0});
+        bool score_prompt = prompt_logprobs >= 0 || (echo && logprobs >= 0);
+        SyncStats stats; double score_ms;
+        std::vector<Scored> scored = score_prompt ? score_tokens(toks, 1, k, true, stats, score_ms) : (sync(toks), std::vector<Scored>());
+
+        // Generation: each sample on its own fork of the session's sequence, all decoded together.
+        struct Sample { llama_seq_id seq = -1; Tokens tokens; std::vector<Scored> scored; std::string text; std::string finish = "length"; json stop_reason = nullptr; bool active = true; };
+        std::vector<Sample> samples(max_tokens > 0 ? n : 0);
+        if (!samples.empty()) make_room(toks.size() + (size_t) n * max_tokens, n);
+        if (free_seqs.size() < samples.size()) throw HttpError{503, "no sequences free; try a smaller n"};
+        for (auto & x : samples) { x.seq = free_seqs.back(); free_seqs.pop_back(); llama_memory_seq_cp(mem, s->seq, x.seq, -1, -1); }
+        auto release = [&] { for (auto & x : samples) if (x.seq >= 0) { llama_memory_seq_rm(mem, x.seq, -1, -1); free_seqs.push_back(x.seq); x.seq = -1; } };
+        try {
+            std::vector<const float *> logits(samples.size(), s->cur_logits.data());
+            for (int step = 0; step < max_tokens; step++) {
+                std::vector<std::array<int, 3>> items;
+                std::vector<size_t> who;
+                for (size_t i = 0; i < samples.size(); i++) {
+                    Sample & x = samples[i];
+                    if (!x.active) continue;
+                    llama_token t = sample(logits[i]);
+                    x.tokens.push_back(t);
+                    x.scored.push_back(score_one(logits[i], t, std::max(logprobs, 0), false));
+                    if ((is_eog[t] && !ignore_eos) || stop_ids.count(t)) { x.finish = "stop"; if (stop_ids.count(t)) x.stop_reason = t; x.active = false; continue; }
+                    size_t before = x.text.size();
+                    x.text += piece[t];
+                    for (const auto & stop : stops) {
+                        size_t from = before >= stop.size() ? before - stop.size() + 1 : 0;
+                        size_t at = stop.empty() ? std::string::npos : x.text.find(stop, from);
+                        if (at == std::string::npos) continue;
+                        x.text.resize(include_stop ? at + stop.size() : at);
+                        x.finish = "stop"; x.stop_reason = stop; x.active = false;
+                        break;
+                    }
+                    if (x.active && step + 1 < max_tokens) { items.push_back({t, (int) (toks.size() + step), x.seq}); who.push_back(i); }
+                    else if (x.active) x.active = false;
+                }
+                if (items.empty()) break;
+                decode(items, std::vector<char>(items.size(), 1));
+                for (size_t m = 0; m < who.size(); m++) logits[who[m]] = llama_get_logits_ith(ctx, m);
+            }
+        } catch (...) { release(); throw; }
+        release();
+
+        // vLLM's response shape.
+        auto choice_of = [&](const Sample * x, size_t index) {
+            json c = {{"index", index}, {"text", (echo ? prompts[j].text : "") + (x ? x->text : "")}, {"logprobs", nullptr},
+                      {"finish_reason", x ? json(x->finish) : json("length")}, {"stop_reason", x ? x->stop_reason : json(nullptr)}};
+            if (logprobs >= 0) {
+                json lp = {{"text_offset", json::array()}, {"token_logprobs", json::array()}, {"tokens", json::array()}, {"top_logprobs", json::array()}};
+                size_t offset = 0;
+                auto add = [&](llama_token t, const Scored * sc) {
+                    lp["text_offset"].push_back(offset); offset += utf8_length(rendered[t]);
+                    lp["tokens"].push_back(rendered[t]);
+                    lp["token_logprobs"].push_back(sc ? json(sc->logprob) : json(nullptr));
+                    lp["top_logprobs"].push_back(sc ? top_dict(*sc, t) : json(nullptr));
+                };
+                if (echo) for (size_t i = 0; i < toks.size(); i++) add(toks[i], i == 0 ? nullptr : &scored[i]);
+                if (x) for (size_t i = 0; i < x->tokens.size(); i++) add(x->tokens[i], &x->scored[i]);
+                c["logprobs"] = lp;
+            }
+            if (prompt_logprobs >= 0) {
+                json list = json::array({nullptr});
+                for (size_t i = 1; i < toks.size(); i++) {
+                    json d = json::object();
+                    for (size_t r = 0; r < scored[i].top.size() && (int) r < prompt_logprobs; r++) {
+                        const auto & a = scored[i].top[r];
+                        d[std::to_string(a.token)] = {{"logprob", a.logprob}, {"rank", r + 1}, {"decoded_token", rendered[a.token]}};
+                    }
+                    d[std::to_string(toks[i])] = {{"logprob", scored[i].logprob}, {"rank", scored[i].rank}, {"decoded_token", rendered[toks[i]]}};
+                    list.push_back(d);
+                }
+                c["prompt_logprobs"] = list;
+            }
+            if (return_ids) { c["prompt_token_ids"] = toks; c["token_ids"] = x ? json(x->tokens) : json::array(); }
+            return c;
+        };
+        if (samples.empty()) for (int i = 0; i < n; i++) choices.push_back(choice_of(nullptr, j * n + i));
+        for (size_t i = 0; i < samples.size(); i++) { completion_tokens += samples[i].tokens.size(); choices.push_back(choice_of(&samples[i], j * n + i)); }
+    }
+    return {
+        {"id", "cmpl-" + std::to_string(++completion_count)}, {"object", "text_completion"},
+        {"created", (long long) std::time(nullptr)}, {"model", alias}, {"choices", choices},
+        {"usage", {{"prompt_tokens", prompt_tokens}, {"total_tokens", prompt_tokens + completion_tokens}, {"completion_tokens", completion_tokens}}},
+    };
+}
+
 // ── HTTP ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char ** argv) {
@@ -1124,6 +1382,9 @@ int main(int argc, char ** argv) {
     handle("/v1/continuations", [&](const json & b, uint64_t id) { return engine.continuations(b, id); }, true);
     handle("/v1/score", [&](const json & b, uint64_t) { return engine.score(b); }, false);
     handle("/v1/template", [&](const json & b, uint64_t) { return engine.render_template(b); }, false);
+    handle("/tokenize", [&](const json & b, uint64_t) { return engine.tokenize_request(b); }, false);
+    handle("/detokenize", [&](const json & b, uint64_t) { return engine.detokenize_request(b); }, false);
+    handle("/v1/completions", [&](const json & b, uint64_t) { return engine.completions(b); }, false);
     server.Get("/health", [&](const httplib::Request &, httplib::Response & res) { send(res, 200, {{"status", "ok"}}); });
     server.Get("/v1/sessions", [&](const httplib::Request &, httplib::Response & res) {
         std::lock_guard<std::mutex> lock(engine.mutex);

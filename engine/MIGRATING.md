@@ -44,7 +44,8 @@ Result on one RTX 4090 with Qwen3.8-27B: 50–200 ms per prediction, and all 11 
 | `/v1/completions` with `logprobs`, a `structured_outputs` regex, pre-token splitting, a second batched request | `POST /v1/continuations {prompt, text, stop}` |
 | `/v1/completions` with `prompt_logprobs` (highlights) | `POST /v1/score {prompt, text}` |
 | `PRETOKENIZE_REGEX`, `splitLastPretoken`, `spineBranches`, `noEndBias` | delete; the server does this |
-| Chat completions, JSON schema, `choice`, free generation | not in the engine; keep using vLLM for these |
+| `/tokenize`, `/detokenize`, `/v1/completions` (logprobs, echo, generation) | still work: the engine answers these in vLLM's format |
+| Chat completions, JSON schema, `choice`, regex constraints | not in the engine; use the campus server |
 
 ## The API in brief
 
@@ -74,6 +75,10 @@ enough, e.g. `^\s*\S+(?=\s)` for one word.
 **`POST /v1/template`** `{messages, add_generation_prompt}` → `{prompt}`. You rarely need it: `/v1/continuations` and
 `/v1/score` take `{messages, role}` in place of `prompt` and render the start of that turn themselves, including
 for a user turn, which has no generation prompt.
+
+**vLLM's own API.** Code that calls `/tokenize`, `/detokenize`, or `/v1/completions` (prompt logprobs, echo,
+generation with logprobs) works against the engine unchanged, as long as it doesn't use constrained decoding,
+streaming, or chat completions. See "vLLM compatibility" in the README.
 
 ## Things to know
 
