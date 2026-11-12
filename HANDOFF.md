@@ -20,10 +20,8 @@ wants short replies and likes to talk design through before building. The codeba
 ### Now: unblock students on the old vLLM API
 
 - [x] vLLM-compatible `/tokenize`, `/detokenize`, `/v1/completions` in the engine (2026-11-12; tested on the 2B model).
-- [x] Deployed 2026-11-12; the suite passes against the 27B, except the two session-restore tests, which weren't run on
-      production because they create many sessions.
-- [ ] **Routing** (Ken is doing this): students' code probably points at vllm.thoughtful-ai.com; Caddy will send it
-      to the engine. Their `model` field can be anything.
+- [x] Deployed 2026-11-12. vllm.thoughtful-ai.com now goes to the engine too (Caddy), and the full suite passes
+      through it. Students' `model` field can be anything.
 - [ ] Tell them what's not there: chat completions, constrained decoding, streaming, penalties (all refused with a 400).
 
 ### Next: lm-internals
