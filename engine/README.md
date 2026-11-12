@@ -150,6 +150,20 @@ For code written against our old vLLM server, the engine also answers vLLM's req
 Not supported, and refused with a 400 rather than ignored: constrained decoding (`structured_outputs`, `guided_*`,
 `response_format`), streaming, penalties, `best_of` and beam search. There's no `/v1/chat/completions`.
 
+## Tests
+
+`uv run pytest` in this directory, with either `ENGINE_URL=http://localhost:52409` (a running engine) or
+`ENGINE_MODEL=/path/to/model.gguf` (the tests start `build/writing-engine` on CPU, or GPU with `ENGINE_GPU=1`).
+`unsloth/Qwen3.5-2B-GGUF` (`Qwen3.5-2B-Q4_K_M.gguf`, 1.3 GB) has the same architecture and tokenizer as the
+production model and runs the suite on CPU in about 30 seconds, so testing never needs the GPU. Don't point the
+suite at the production engine while people are writing: the session tests create dozens of sessions, which pushes
+real writers' caches out to host memory.
+
+`tests/test_known_gaps.py` lists properties the engine doesn't have yet, as expected failures. Tests marked `model`
+check the model's predictions (the token-healing cases) rather than the engine's bookkeeping. Speed is measured
+separately, in `bench/` (see `bench/LOG.md`); the page's own client logic is checked by
+`experiments/token-healing/trie_check.mjs`.
+
 ## Limits
 
 - Requests run one at a time, so many people typing at once queue behind each other.

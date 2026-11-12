@@ -1,0 +1,18 @@
+[project]
+name = "writing-engine-tests"
+version = "0"
+description = "Tests for the writing engine's HTTP API"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+xfail_strict = true
+markers = ["model: checks a property of the model (its predictions), not just of the engine"]
