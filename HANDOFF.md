@@ -20,11 +20,10 @@ wants short replies and likes to talk design through before building. The codeba
 ### Now: unblock students on the old vLLM API
 
 - [x] vLLM-compatible `/tokenize`, `/detokenize`, `/v1/completions` in the engine (2026-11-12; tested on the 2B model).
-- [ ] **Deploy:** `docker compose up -d --build` in `engine/`. Loading the model takes a few minutes, during which
-      the page's Tokens mode is down.
-- [ ] Run the suite once against the deployed engine with the 27B model, at a quiet time (it creates many sessions).
-- [ ] **Routing:** students' code probably points at vllm.thoughtful-ai.com. Either point that name at the engine in
-      Caddy or have them switch to llm.thoughtful-ai.com. Their `model` field can be anything.
+- [x] Deployed 2026-11-12; the suite passes against the 27B, except the two session-restore tests, which weren't run on
+      production because they create many sessions.
+- [ ] **Routing** (Ken is doing this): students' code probably points at vllm.thoughtful-ai.com; Caddy will send it
+      to the engine. Their `model` field can be anything.
 - [ ] Tell them what's not there: chat completions, constrained decoding, streaming, penalties (all refused with a 400).
 
 ### Next: lm-internals
