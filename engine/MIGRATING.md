@@ -2,7 +2,7 @@
 
 For people (and their coding agents) who built on `docs/engine-tokens.js` and a vLLM server. This explains
 what changed and why, and how old code maps to new. [README.md](README.md) has the build steps and full API;
-[`docs/engine-trie.js`](../docs/engine-trie.js) is a complete working client in about 150 lines.
+[`docs/engine-tokens.js`](../docs/engine-tokens.js) is a complete working client.
 
 ## What was wrong with the old way
 
@@ -71,8 +71,9 @@ enough, e.g. `^\s*\S+(?=\s)` for one word.
 **`POST /v1/score`** `{session, prompt, text}` → `{tokens: [{text, logprob, top, top_logprob}]}`. One item per token of
 `text`: how likely it was, and what the model expected most there. The `text` fields concatenate to the input.
 
-**`POST /v1/template`** `{messages, add_generation_prompt}` → `{prompt}`. For a turn with no generation prompt
-(writing as the user), render a placeholder message and cut the prompt there; see `triePrefix`.
+**`POST /v1/template`** `{messages, add_generation_prompt}` → `{prompt}`. You rarely need it: `/v1/continuations` and
+`/v1/score` take `{messages, role}` in place of `prompt` and render the start of that turn themselves, including
+for a user turn, which has no generation prompt.
 
 ## Things to know
 

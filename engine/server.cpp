@@ -12,7 +12,8 @@
 //   point where the tokenization is settled (see `boundary`). Probabilities are the model's own;
 //   nothing is renormalized over the candidates we happened to keep.
 //
-// Endpoints (JSON): GET /health, GET /v1/models, POST /v1/template, POST /v1/continuations, POST /v1/score.
+// Endpoints (JSON): GET /health, GET /v1/models, GET /v1/sessions, POST /v1/template, POST /v1/continuations,
+// POST /v1/score.
 // Requests run one at a time. Each writer ("session") has its own cache; see Engine for how they share the GPU.
 
 #include "llama.h"
@@ -22,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -30,6 +32,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <queue>
 #include <regex>
 #include <set>
 #include <string>
@@ -178,10 +181,24 @@ struct Engine {
     using ChunkFn = std::function<void(const std::vector<size_t> &, const std::vector<const float *> &)>;
     SyncStats sync(const Tokens & target, const ChunkFn & on_chunk = nullptr, size_t logits_from = SIZE_MAX);
 
+    // Scoring: the logprob of each token from `first` on, given the tokens before it, with the k likeliest
+    // tokens there (and the actual token's rank, if asked). Leaves the session holding `tokens`.
+    struct Alt { llama_token token; double logprob; };
+    struct Scored { double logprob = 0; int rank = 0; std::vector<Alt> top; };
+    Scored score_one(const float * logits, llama_token actual, int k, bool want_rank) const;
+    std::vector<Scored> score_tokens(const Tokens & tokens, size_t first, int k, bool want_rank, SyncStats & stats, double & score_ms);
+
+    // Chat templates
+    std::map<std::string, std::string> prefix_cache;
+    std::string apply_template(const json & messages, bool add_generation_prompt, bool enable_thinking) const;
+    std::string turn_prefix(const json & messages, const std::string & role, bool enable_thinking);
+    std::string prompt_of(const json & req);
+
     // Requests
     json continuations(const json & req, uint64_t id);
     json score(const json & req);
     json render_template(const json & req);
+
 };
 
 void Engine::load(const std::string & path, int ctx_size, int n_gpu_layers, int seqs) {
@@ -588,7 +605,7 @@ struct Expansion {
 };
 
 json Engine::continuations(const json & req, uint64_t id) {
-    std::string prompt = req.value("prompt", ""), text = req.value("text", "");
+    std::string prompt = prompt_of(req), text = req.value("text", "");
     int max_rounds = req.value("max_rounds", 8), max_batch = req.value("max_batch", 8), branch = req.value("branch", 8);
     int max_depth = req.value("max_depth", 8), max_chars = req.value("max_chars", 0);
     double min_prob = req.value("min_prob", 0.01), time_ms = req.value("time_ms", 400.0);
@@ -772,7 +789,8 @@ json Engine::continuations(const json & req, uint64_t id) {
         if (!typed.empty()) unresolved = 1;  // the root itself
         apply(0, expand(nodes[0], s->cur_logits.data(), -INFINITY, -INFINITY));
 
-        for (; rounds < max_rounds && now_ms() - t0 < time_ms; rounds++) {
+        // At least one round, even if a slow prefill used up the time: otherwise the answer is just the typed text.
+        for (; rounds < max_rounds && (rounds == 0 || now_ms() - t0 < time_ms); rounds++) {
             if (superseded()) throw Superseded{};
             double total = covered + std::max(unresolved, 0.0);
             if (total <= 0) break;
@@ -902,49 +920,80 @@ json Engine::continuations(const json & req, uint64_t id) {
 
 // ── Scoring ──────────────────────────────────────────────────────────────────
 
-// How likely was each token of `text`, given `prompt` and the text before it, and what did the model expect instead?
-json Engine::score(const json & req) {
-    std::string prompt = req.value("prompt", ""), text = req.value("text", "");
-    double t0 = now_ms();
-    use_session(req, prompt + text);
-    Tokenized t = tokenize(prompt + text);
-    size_t first = 0;
-    while (first < t.tokens.size() && t.offsets[first] < prompt.size()) first++;
-    first = std::max<size_t>(first, 1);
-    size_t n = t.tokens.size();
+Engine::Scored Engine::score_one(const float * logits, llama_token actual, int k, bool want_rank) const {
+    Scored out;
+    double lse = log_sum_exp(logits, n_vocab);
+    out.logprob = logits[actual] - lse;
+    using Entry = std::pair<float, llama_token>;
+    std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> heap;   // the k largest so far, smallest on top
+    for (llama_token t = 0; t < n_vocab && k > 0; t++) {
+        if ((int) heap.size() < k) heap.push({logits[t], t});
+        else if (logits[t] > heap.top().first) { heap.pop(); heap.push({logits[t], t}); }
+    }
+    for (; !heap.empty(); heap.pop()) out.top.push_back({heap.top().second, heap.top().first - lse});
+    std::reverse(out.top.begin(), out.top.end());
+    if (want_rank) {
+        out.rank = 1;
+        for (llama_token t = 0; t < n_vocab; t++) out.rank += logits[t] > logits[actual];
+    }
+    return out;
+}
 
-    struct Scored { double logprob; llama_token top; double top_logprob; };
-    std::vector<Scored> scored(n);
-    auto score_logits = [&](size_t i, const float * logits) {    // logits predict token i + 1
-        double lse = log_sum_exp(logits, n_vocab);
-        llama_token top = std::max_element(logits, logits + n_vocab) - logits;
-        scored[i + 1] = {logits[t.tokens[i + 1]] - lse, top, logits[top] - lse};
-    };
+std::vector<Engine::Scored> Engine::score_tokens(const Tokens & tokens, size_t first, int k, bool want_rank, SyncStats & stats, double & score_ms) {
+    size_t n = tokens.size();
+    first = std::max<size_t>(first, 1);
+    std::vector<Scored> out(n);
+    score_ms = 0;
+    if (first >= n) { stats = sync(tokens); return out; }
+    // Sync to just before the first scored token, so that every scored position gets decoded with logits.
+    stats = sync(Tokens(tokens.begin(), tokens.begin() + first));
+    out[first] = score_one(s->cur_logits.data(), tokens[first], k, want_rank);
+    SyncStats rest = sync(tokens, [&](const std::vector<size_t> & positions, const std::vector<const float *> & logits) {
+        double t1 = now_ms();
+        parallel_for(positions.size(), [&](size_t j) { out[positions[j] + 1] = score_one(logits[j], tokens[positions[j] + 1], k, want_rank); });
+        score_ms += now_ms() - t1;
+    }, first + 1);
+    stats.decoded += rest.decoded; stats.decode_ms += rest.decode_ms;
+    return out;
+}
+
+// How likely was each token of `text`, given the prompt and the text before it, and what did the model expect instead?
+json Engine::score(const json & req) {
+    std::string prompt = prompt_of(req), text = req.value("text", "");
+    int k = std::clamp(req.value("top_k", 1), 1, 20);
+    double t0 = now_ms();
+    std::string full = prompt + text;
+    use_session(req, full);
+    Tokenized t = tokenize(full);
+    size_t n = t.tokens.size();
+    // The first token with any of `text` in it. It may start inside the prompt (when the text's first characters
+    // merge with the prompt's last ones); it's scored whole, but its item only shows its part of `text`.
+    size_t first = 0;
+    while (first < n && t.offsets[first + 1] <= prompt.size()) first++;
 
     SyncStats stats;
     double score_ms = 0;
-    if (first < n) {
-        // Sync to just before the text, so that every text position gets decoded with logits.
-        Tokens head(t.tokens.begin(), t.tokens.begin() + first);
-        stats = sync(head);
-        score_logits(first - 1, s->cur_logits.data());
-        SyncStats rest = sync(t.tokens, [&](const std::vector<size_t> & positions, const std::vector<const float *> & logits) {
-            double t1 = now_ms();
-            parallel_for(positions.size(), [&](size_t k) { score_logits(positions[k], logits[k]); });
-            score_ms += now_ms() - t1;
-        }, first + 1);
-        stats.decoded += rest.decoded; stats.decode_ms += rest.decode_ms;
-    }
+    std::vector<Scored> scored = score_tokens(t.tokens, first, k, false, stats, score_ms);
 
     // Merge tokens that split a character, so every item is valid text.
     json items = json::array();
-    std::string buf; double lp = 0; llama_token top = LLAMA_TOKEN_NULL; double top_lp = 0;
-    for (size_t i = first; i < n; i++) {
-        if (buf.empty()) { top = scored[i].top; top_lp = scored[i].top_logprob; }
-        buf += rendered[t.tokens[i]]; lp += scored[i].logprob;
-        if (incomplete_utf8_tail(buf) && i + 1 < n) continue;
-        items.push_back({{"text", buf}, {"logprob", lp}, {"top", rendered[top]}, {"top_logprob", top_lp}});
-        buf.clear(); lp = 0;
+    auto alternatives = [&](const Scored & sc) {
+        json alts = json::array();
+        for (const auto & a : sc.top) alts.push_back({{"text", rendered[a.token]}, {"logprob", a.logprob}});
+        return alts;
+    };
+    size_t begin = std::max<size_t>(first, 1);
+    double lp = 0;
+    for (size_t i = begin; i < n; i++) {
+        lp += scored[i].logprob;
+        size_t from = std::max(t.offsets[begin], prompt.size()), to = t.offsets[i + 1];
+        std::string piece_text = full.substr(from, to - from);
+        if (incomplete_utf8_tail(piece_text) && i + 1 < n) continue;
+        const Scored & head = scored[begin];
+        json item = {{"text", piece_text}, {"logprob", lp}, {"top", rendered[head.top[0].token]}, {"top_logprob", head.top[0].logprob}};
+        if (k > 1) item["alternatives"] = alternatives(head);
+        items.push_back(item);
+        lp = 0; begin = i + 1;
     }
     return {
         {"tokens", items},
@@ -954,19 +1003,72 @@ json Engine::score(const json & req) {
 
 // ── Chat template ────────────────────────────────────────────────────────────
 
-json Engine::render_template(const json & req) {
+static const std::string PLACEHOLDER = "XYZZYPLACEHOLDER";
+
+static std::string content_of(const json & message) {
+    const json & c = message.at("content");
+    if (c.is_string()) return c.get<std::string>();
+    std::string out;   // OpenAI-style parts: [{type: "text", text}]
+    if (c.is_array()) for (const auto & part : c) if (part.value("type", "") == "text") out += part.value("text", "");
+    return out;
+}
+
+static bool enable_thinking_of(const json & req, bool fallback) {
+    if (req.contains("enable_thinking")) return req["enable_thinking"].get<bool>();
+    if (req.contains("chat_template_kwargs") && req["chat_template_kwargs"].is_object())
+        return req["chat_template_kwargs"].value("enable_thinking", fallback);
+    return fallback;
+}
+
+std::string Engine::apply_template(const json & messages, bool add_generation_prompt, bool enable_thinking) const {
+    if (!messages.is_array()) throw HttpError{400, "messages must be a list"};
     common_chat_templates_inputs inputs;
-    for (const auto & m : req.at("messages")) {
+    for (const auto & m : messages) {
         common_chat_msg msg;
         msg.role = m.at("role").get<std::string>();
-        msg.content = m.at("content").get<std::string>();
+        msg.content = content_of(m);
         inputs.messages.push_back(msg);
     }
-    inputs.add_generation_prompt = req.value("add_generation_prompt", true);
-    inputs.enable_thinking = req.value("enable_thinking", false);
+    inputs.add_generation_prompt = add_generation_prompt;
+    inputs.enable_thinking = enable_thinking;
     inputs.use_jinja = true;
-    std::string prompt = common_chat_templates_apply(templates.get(), inputs).prompt.str();
-    return {{"prompt", prompt}};
+    return common_chat_templates_apply(templates.get(), inputs).prompt.str();
+}
+
+// The prompt up to where a new message from `role` starts, after `messages`. For the assistant that's the generation
+// prompt. Other roles have none, so we render a placeholder message and cut there, and check that the cut is at a
+// token boundary, so the message's text can be appended to the result.
+std::string Engine::turn_prefix(const json & messages, const std::string & role, bool enable_thinking) {
+    std::string key = role + (enable_thinking ? "+" : "-") + messages.dump();
+    auto it = prefix_cache.find(key);
+    if (it != prefix_cache.end()) return it->second;
+    std::string out;
+    if (role == "assistant") out = apply_template(messages, true, enable_thinking);
+    else {
+        json with = messages;
+        with.push_back({{"role", role}, {"content", PLACEHOLDER}});
+        std::string full = apply_template(with, false, enable_thinking);
+        size_t cut = full.rfind(PLACEHOLDER);
+        if (cut == std::string::npos) throw HttpError{500, "the chat template changes message text, so the start of a " + role + " message can't be found"};
+        out = full.substr(0, cut);
+        Tokens head = tokenize_raw(out), whole = tokenize_raw(full);
+        if (head.size() > whole.size() || !std::equal(head.begin(), head.end(), whole.begin()))
+            throw HttpError{500, "the start of a " + role + " message isn't at a token boundary in this chat template"};
+    }
+    if (prefix_cache.size() >= 32) prefix_cache.clear();
+    prefix_cache[key] = out;
+    return out;
+}
+
+// The prompt of a request: `prompt` as given, or the start of a new message from `role` (default assistant) after `messages`.
+std::string Engine::prompt_of(const json & req) {
+    if (!req.contains("messages")) return req.value("prompt", "");
+    if (req.contains("prompt")) throw HttpError{400, "give either prompt or messages, not both"};
+    return turn_prefix(req["messages"], req.value("role", "assistant"), enable_thinking_of(req, false));
+}
+
+json Engine::render_template(const json & req) {
+    return {{"prompt", apply_template(req.at("messages"), req.value("add_generation_prompt", true), enable_thinking_of(req, false))}};
 }
 
 // ── HTTP ─────────────────────────────────────────────────────────────────────

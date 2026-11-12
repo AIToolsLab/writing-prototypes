@@ -90,6 +90,11 @@ in the second decimal of a logit, because the GPU computes different batch shape
 
 All bodies are JSON. `session` is optional everywhere it appears; see above.
 
+Wherever a request takes `prompt`, it can take `{messages, role?}` instead: the prompt is then the chat template
+up to the start of a new message from `role` (default `assistant`, which uses the generation prompt with thinking
+off). For other roles the engine renders a placeholder message, cuts there, and checks that the cut falls on a
+token boundary. Rendered prefixes are cached, so sending `messages` with every keystroke is cheap.
+
 **`POST /v1/continuations`** `{session?, prompt, text, stop?, units?, corrections?, corrections_ms?, max_chars?, min_prob?, max_rounds?, max_batch?, branch?, max_depth?, time_ms?}`
 
 `prompt` is the templated context (special tokens are parsed); `text` is the draft so far. A continuation stops
@@ -105,6 +110,9 @@ times as likely as all the paths that keep to it, for up to `corrections_ms` (de
 `prob` is that ratio, not a probability given the typed text. Only the last word is reconsidered: the page keeps the
 corrections it had before a space was typed.
 
+`time_ms` (default 400) counts from when the request starts, prefill included; at least one round of search runs
+even if the prefill used it all up.
+
 ```json
 {"typed": " net", "prefix_logprob": -0.01, "unresolved": 4e-7,
  "continuations": [{"text": "works are", "prob": 0.45, "end": false, "done": true}, …],
@@ -115,8 +123,11 @@ Continuations are disjoint, so the probability that the text continues with some
 continuations that start with it (a lower bound, since unlikely branches were dropped). A newer request
 from the same session supersedes its older ones, which return 409.
 
-**`POST /v1/score`** `{session?, prompt, text}` → for each token of `text`: its `logprob`, and the model's `top` choice
-there with `top_logprob`. Tokens that split a character are merged, so the `text` fields concatenate to `text`.
+**`POST /v1/score`** `{session?, prompt, text, top_k?}` → for each token of `text`: its `logprob`, and the model's `top`
+choice there with `top_logprob`; with `top_k` > 1 (up to 20), also `alternatives`, the k likeliest `{text, logprob}`.
+Tokens that split a character are merged, so the `text` fields concatenate to `text`. If the text's first
+characters share a token with the end of the prompt, that token is scored whole and its item shows only the part
+in `text`. Only `text` is scored, which saves computing logits over the prompt; the prompt stays cached.
 
 **`POST /v1/template`** `{messages, add_generation_prompt?, enable_thinking?}` → `{prompt}`, using the model's
 chat template.
