@@ -35,9 +35,11 @@ def test_compare_named_options(engine, session):
     assert p[" powerful"] > p[" banana"]
 
 
-@pytest.mark.xfail(reason="no /v1/chat/completions; the old Structured engine used it with json_schema")
-def test_chat_completions(engine):
-    engine("/v1/chat/completions", {"messages": REWRITE, "max_tokens": 5})
+@pytest.mark.xfail(reason="no constrained decoding: the old Structured engine used chat completions with json_schema")
+def test_chat_json_schema(engine):
+    schema = {"type": "object", "properties": {"word": {"type": "string"}}, "required": ["word"]}
+    engine("/v1/chat/completions", {"messages": REWRITE, "max_tokens": 20, "enable_thinking": False,
+                                    "response_format": {"type": "json_schema", "json_schema": {"name": "w", "schema": schema}}})
 
 
 @pytest.mark.xfail(reason="a session brought back from host memory has lost its checkpoints, so a jump back decodes from scratch")

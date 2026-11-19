@@ -122,3 +122,60 @@ def test_echo_without_generation(engine):
                                    {"presence_penalty": 0.5}, {"logprobs": 50}])
 def test_unsupported_options_are_refused(engine, extra):
     assert engine.raw("/v1/completions", {"prompt": "Hi", "max_tokens": 1, **extra}).status_code == 400
+
+
+HI = [{"role": "user", "content": "Say hi in one word."}]
+
+
+def test_chat_no_thinking(engine):
+    r = engine("/v1/chat/completions", {"model": "x", "messages": HI, "max_tokens": 20, "temperature": 0,
+                                        "chat_template_kwargs": {"enable_thinking": False}})
+    assert r["object"] == "chat.completion"
+    c = r["choices"][0]
+    m = c["message"]
+    assert m["role"] == "assistant" and m["content"] and m["reasoning"] is None
+    assert "<think>" not in m["content"] and "</think>" not in m["content"]
+    assert c["finish_reason"] in ("stop", "length") and r["usage"]["completion_tokens"] <= 20
+
+
+def test_chat_thinking_by_default(engine):
+    """Like vLLM with --reasoning-parser qwen3: thinking is on unless turned off, and goes in reasoning."""
+    r = engine("/v1/chat/completions", {"messages": HI, "max_tokens": 100, "temperature": 0})
+    m = r["choices"][0]["message"]
+    assert m["reasoning"] and m["reasoning"] == m["reasoning_content"]
+    assert "</think>" not in m["reasoning"] and (m["content"] is None or "</think>" not in m["content"])
+
+
+def test_chat_logprobs(engine):
+    r = engine("/v1/chat/completions", {"messages": HI, "max_tokens": 5, "temperature": 0, "logprobs": True, "top_logprobs": 3,
+                                        "enable_thinking": False})
+    content = r["choices"][0]["logprobs"]["content"]
+    assert len(content) == r["usage"]["completion_tokens"]
+    for item in content:
+        assert len(item["top_logprobs"]) == 3
+        assert item["logprob"] == pytest.approx(item["top_logprobs"][0]["logprob"])   # greedy
+        assert bytes(item["bytes"]).decode("utf-8", "replace") == item["token"]
+
+
+def test_chat_stream_all_at_once(engine):
+    body = {"messages": HI, "max_tokens": 100, "temperature": 0, "stream": True, "stream_options": {"include_usage": True}}
+    r = engine.raw("/v1/chat/completions", body)
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    events = [line[6:] for line in r.text.split("\n\n") if line.startswith("data: ")]
+    assert events[-1] == "[DONE]"
+    import json
+    chunks = [json.loads(e) for e in events[:-1]]
+    assert all(c["object"] == "chat.completion.chunk" for c in chunks)
+    assert chunks[-1]["usage"]["completion_tokens"] > 0
+    deltas = [c["choices"][0] for c in chunks if c["choices"]]
+    reasoning = "".join(d["delta"].get("reasoning") or "" for d in deltas)
+    content = "".join(d["delta"].get("content") or "" for d in deltas)
+    plain = engine("/v1/chat/completions", {**body, "stream": False})["choices"][0]["message"]
+    assert reasoning == (plain["reasoning"] or "") and content == (plain["content"] or "")
+    assert deltas[-1]["finish_reason"] in ("stop", "length")
+
+
+def test_chat_refusals(engine):
+    for extra in [{"max_tokens": 10000}, {"tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}]},
+                  {"presence_penalty": 1.0}]:
+        assert engine.raw("/v1/chat/completions", {"messages": HI, **extra}).status_code == 400, extra

@@ -13,7 +13,8 @@
 //   nothing is renormalized over the candidates we happened to keep.
 //
 // Endpoints (JSON): GET /health, GET /v1/models, GET /v1/sessions, POST /v1/template, POST /v1/continuations,
-// POST /v1/score; and for code written against vLLM, POST /tokenize, POST /detokenize, POST /v1/completions.
+// POST /v1/score; and for code written against vLLM, POST /tokenize, POST /detokenize, POST /v1/completions,
+// POST /v1/chat/completions.
 // Requests run one at a time. Each writer ("session") has its own cache; see Engine for how they share the GPU.
 
 #include "llama.h"
@@ -225,9 +226,11 @@ struct Engine {
 
     // vLLM-compatible requests
     Tokens tokenize_text(const std::string & text, bool add_special) const;
+    std::string vllm_chat_prompt(const json & req) const;
     json tokenize_request(const json & req) const;
     json detokenize_request(const json & req) const;
     json completions(const json & req);
+    json chat_completions(const json & req);
     uint64_t completion_count = 0;
 };
 
@@ -1115,25 +1118,26 @@ Tokens Engine::tokenize_text(const std::string & text, bool add_special) const {
     return out;
 }
 
+// vLLM's rendering of `messages`: a generation prompt (or continue_final_message), and the template's own
+// default for thinking (on, for Qwen).
+std::string Engine::vllm_chat_prompt(const json & req) const {
+    bool cont = req.value("continue_final_message", false), gen = req.value("add_generation_prompt", true);
+    if (cont && gen && req.contains("add_generation_prompt")) throw HttpError{400, "continue_final_message and add_generation_prompt can't both be true"};
+    bool thinking = enable_thinking_of(req, true);
+    json messages = req.at("messages");
+    if (!cont) return apply_template(messages, gen, thinking);
+    if (!messages.is_array() || messages.empty()) throw HttpError{400, "continue_final_message needs a final message"};
+    messages.back()["content"] = content_of(messages.back()) + PLACEHOLDER;
+    std::string text = apply_template(messages, false, thinking);
+    size_t cut = text.rfind(PLACEHOLDER);
+    if (cut == std::string::npos) throw HttpError{500, "the chat template changes message text, so the final message can't be continued"};
+    text.resize(cut);
+    return text;
+}
+
 json Engine::tokenize_request(const json & req) const {
-    Tokens tokens;
-    if (req.contains("messages")) {
-        // vLLM's defaults: a generation prompt, and the template's own default for thinking (on, for Qwen).
-        bool cont = req.value("continue_final_message", false), gen = req.value("add_generation_prompt", true);
-        if (cont && gen && req.contains("add_generation_prompt")) throw HttpError{400, "continue_final_message and add_generation_prompt can't both be true"};
-        bool thinking = enable_thinking_of(req, true);
-        json messages = req["messages"];
-        std::string text;
-        if (cont) {
-            if (!messages.is_array() || messages.empty()) throw HttpError{400, "continue_final_message needs a final message"};
-            messages.back()["content"] = content_of(messages.back()) + PLACEHOLDER;
-            text = apply_template(messages, false, thinking);
-            size_t cut = text.rfind(PLACEHOLDER);
-            if (cut == std::string::npos) throw HttpError{500, "the chat template changes message text, so the final message can't be continued"};
-            text.resize(cut);
-        } else text = apply_template(messages, gen, thinking);
-        tokens = tokenize_text(text, req.value("add_special_tokens", false));
-    } else tokens = tokenize_text(req.value("prompt", ""), req.value("add_special_tokens", true));
+    Tokens tokens = req.contains("messages") ? tokenize_text(vllm_chat_prompt(req), req.value("add_special_tokens", false))
+                                             : tokenize_text(req.value("prompt", ""), req.value("add_special_tokens", true));
     json strs = nullptr;
     if (req.value("return_token_strs", false)) {
         strs = json::array();
@@ -1329,6 +1333,97 @@ json Engine::completions(const json & req) {
     };
 }
 
+// Chat: the messages rendered as vLLM would, generated through completions(), and the reply split at </think> into
+// reasoning and content (vLLM's qwen3 reasoning parser). Replies are capped at CHAT_MAX_TOKENS, since every other
+// request waits while one generates. Streaming is answered all at once, as events (see main).
+static const int CHAT_MAX_TOKENS = 128;   // about 3 s on the 4090 with the 27B
+
+json Engine::chat_completions(const json & req) {
+    auto given = [&](const char * k) { return req.contains(k) && !req[k].is_null(); };
+    if (given("tools") && !req["tools"].empty() && req.value("tool_choice", json("auto")) != "none")
+        throw HttpError{400, "tools aren't supported by this server"};
+    int max_tokens = given("max_completion_tokens") ? req["max_completion_tokens"].get<int>()
+                   : given("max_tokens") ? req["max_tokens"].get<int>() : CHAT_MAX_TOKENS;
+    if (max_tokens > CHAT_MAX_TOKENS) throw HttpError{400, "max_tokens can be at most " + std::to_string(CHAT_MAX_TOKENS) + " on this server"};
+    int top = given("top_logprobs") ? req["top_logprobs"].get<int>() : 0;
+    bool want_logprobs = req.value("logprobs", false);
+
+    std::string prompt = vllm_chat_prompt(req);
+    json creq = req;
+    for (const char * k : {"messages", "stream", "stream_options", "logprobs", "top_logprobs", "max_completion_tokens",
+                           "tools", "tool_choice", "parallel_tool_calls", "echo", "prompt_logprobs", "return_token_ids"})
+        creq.erase(k);
+    creq["prompt"] = prompt;
+    creq["add_special_tokens"] = false;
+    creq["max_tokens"] = max_tokens;
+    if (want_logprobs) creq["logprobs"] = top;
+    json out = completions(creq);
+
+    // Where the reply starts: inside a thinking block if the prompt opened one.
+    size_t open = prompt.rfind("<think>"), close = prompt.rfind("</think>");
+    bool thinking = open != std::string::npos && (close == std::string::npos || close < open);
+    json choices = json::array();
+    for (const auto & c : out["choices"]) {
+        std::string text = c["text"], reasoning;
+        bool has_reasoning = false, in_think = thinking;
+        if (!in_think && starts_with(text, "<think>")) { text.erase(0, 7); in_think = true; }
+        size_t end = text.find("</think>");
+        if (end != std::string::npos) { reasoning = text.substr(0, end); text.erase(0, end + 8); has_reasoning = true; }
+        else if (in_think) { reasoning = text; text.clear(); has_reasoning = true; }
+        auto trim = [](std::string & t) { t.erase(0, t.find_first_not_of("\n")); t.erase(t.find_last_not_of("\n") + 1); };
+        trim(reasoning); trim(text);
+        json message = {{"role", "assistant"}, {"content", text.empty() && has_reasoning ? json(nullptr) : json(text)},
+                        {"reasoning", has_reasoning ? json(reasoning) : json(nullptr)},
+                        {"reasoning_content", has_reasoning ? json(reasoning) : json(nullptr)}, {"tool_calls", json::array()}};
+        json lp = nullptr;
+        if (want_logprobs) {
+            // OpenAI's shape: one entry per generated token, with its top alternatives, likeliest first.
+            auto bytes_of = [](const std::string & t) { json b = json::array(); for (unsigned char ch : t) b.push_back(ch); return b; };
+            lp = {{"content", json::array()}};
+            const json & l = c["logprobs"];
+            for (size_t i = 0; i < l["tokens"].size(); i++) {
+                std::vector<std::pair<double, std::string>> alts;
+                for (const auto & [t, v] : l["top_logprobs"][i].items()) alts.push_back({v.get<double>(), t});
+                std::sort(alts.begin(), alts.end(), std::greater<>());
+                if ((int) alts.size() > top) alts.resize(top);
+                json tops = json::array();
+                for (const auto & [v, t] : alts) tops.push_back({{"token", t}, {"logprob", v}, {"bytes", bytes_of(t)}});
+                std::string t = l["tokens"][i];
+                lp["content"].push_back({{"token", t}, {"logprob", l["token_logprobs"][i]}, {"bytes", bytes_of(t)}, {"top_logprobs", tops}});
+            }
+        }
+        choices.push_back({{"index", c["index"]}, {"message", message}, {"logprobs", lp}, {"finish_reason", c["finish_reason"]},
+                           {"stop_reason", c["stop_reason"]}});
+    }
+    return {{"id", "chatcmpl-" + std::to_string(completion_count)}, {"object", "chat.completion"}, {"created", out["created"]},
+            {"model", alias}, {"choices", choices}, {"usage", out["usage"]}};
+}
+
+// A chat reply as the events a streaming client expects, all sent at once: per choice, the role, the reasoning,
+// the content (with the logprobs), then the finish reason; then usage if asked; then [DONE].
+static std::string chat_events(const json & reply, bool usage) {
+    std::string out;
+    auto event = [&](const json & choices, const json * u = nullptr) {
+        json chunk = {{"id", reply["id"]}, {"object", "chat.completion.chunk"}, {"created", reply["created"]},
+                      {"model", reply["model"]}, {"choices", choices}};
+        if (u) chunk["usage"] = *u;
+        out += "data: " + chunk.dump(-1, ' ', false, json::error_handler_t::replace) + "\n\n";
+    };
+    for (const auto & c : reply["choices"]) {
+        auto delta = [&](const json & d, const json & lp = nullptr, const json & finish = nullptr) {
+            event(json::array({{{"index", c["index"]}, {"delta", d}, {"logprobs", lp}, {"finish_reason", finish}}}));
+        };
+        const json & m = c["message"];
+        delta({{"role", "assistant"}, {"content", ""}});
+        if (!m["reasoning"].is_null()) delta({{"reasoning", m["reasoning"]}, {"reasoning_content", m["reasoning"]}});
+        if (!m["content"].is_null()) delta({{"content", m["content"]}}, c["logprobs"]);
+        else if (!c["logprobs"].is_null()) delta(json::object(), c["logprobs"]);
+        delta(json::object(), nullptr, c["finish_reason"]);
+    }
+    if (usage) event(json::array(), &reply["usage"]);
+    return out + "data: [DONE]\n\n";
+}
+
 // ── HTTP ─────────────────────────────────────────────────────────────────────
 
 int main(int argc, char ** argv) {
@@ -1373,7 +1468,12 @@ int main(int argc, char ** argv) {
                 uint64_t id = supersedes ? engine.stamp(key) : 0;
                 std::lock_guard<std::mutex> lock(engine.mutex);
                 if (supersedes && !engine.is_latest(key, id)) throw Superseded{};
-                send(res, 200, fn(body, id));
+                json out = fn(body, id);
+                if (out.value("object", "") == "chat.completion" && body.value("stream", false)) {
+                    bool usage = body.contains("stream_options") && body["stream_options"].is_object() && body["stream_options"].value("include_usage", false);
+                    res.status = 200;
+                    res.set_content(chat_events(out, usage), "text/event-stream");
+                } else send(res, 200, out);
             } catch (const Superseded &) { send(res, 409, {{"error", "superseded by a newer request"}});
             } catch (const HttpError & e) { send(res, e.status, {{"error", e.message}});
             } catch (const std::exception & e) { send(res, 400, {{"error", e.what()}}); }
@@ -1385,6 +1485,7 @@ int main(int argc, char ** argv) {
     handle("/tokenize", [&](const json & b, uint64_t) { return engine.tokenize_request(b); }, false);
     handle("/detokenize", [&](const json & b, uint64_t) { return engine.detokenize_request(b); }, false);
     handle("/v1/completions", [&](const json & b, uint64_t) { return engine.completions(b); }, false);
+    handle("/v1/chat/completions", [&](const json & b, uint64_t) { return engine.chat_completions(b); }, false);
     server.Get("/health", [&](const httplib::Request &, httplib::Response & res) { send(res, 200, {{"status", "ok"}}); });
     server.Get("/v1/sessions", [&](const httplib::Request &, httplib::Response & res) {
         std::lock_guard<std::mutex> lock(engine.mutex);

@@ -22,7 +22,9 @@ wants short replies and likes to talk design through before building. The codeba
 - [x] vLLM-compatible `/tokenize`, `/detokenize`, `/v1/completions` in the engine (2026-11-12; tested on the 2B model).
 - [x] Deployed 2026-11-12. vllm.thoughtful-ai.com now goes to the engine too (Caddy), and the full suite passes
       through it. Students' `model` field can be anything.
-- [ ] Tell them what's not there: chat completions, constrained decoding, streaming, penalties (all refused with a 400).
+- [x] `/v1/chat/completions` (2026-11-16; tested on the 2B model, not yet deployed): up to 128 tokens, since it blocks
+      writers (~2.3 s per 100 tokens); `stream: true` gets all its events at once at the end.
+- [ ] Tell them what's not there: constrained decoding, tools, penalties, real streaming (all refused with a 400).
 
 ### Next: lm-internals
 

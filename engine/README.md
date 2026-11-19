@@ -146,9 +146,14 @@ For code written against our old vLLM server, the engine also answers vLLM's req
   `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `logprobs` and `prompt_logprobs` (up to 20), `echo`, `stop`,
   `stop_token_ids`, `include_stop_str_in_output`, `ignore_eos`, `logit_bias`, `return_token_ids`. Logprobs are the
   model's raw ones, before temperature and bias, as vLLM reports them.
+- `POST /v1/chat/completions` with `messages` (rendered as `/tokenize` does, so thinking defaults to on), the same
+  sampling options, `max_tokens` or `max_completion_tokens` (at most 128, the default; other requests wait while a
+  reply generates, about 2.3 s per 100 tokens on the 4090), and `logprobs`/`top_logprobs`. As with vLLM's qwen3
+  reasoning parser, thinking goes in `message.reasoning` (and `reasoning_content`); a reply cut off while thinking
+  has `content: null`. `stream: true` is answered with server-sent events, but all at once when the reply is done.
 
 Not supported, and refused with a 400 rather than ignored: constrained decoding (`structured_outputs`, `guided_*`,
-`response_format`), streaming, penalties, `best_of` and beam search. There's no `/v1/chat/completions`.
+`response_format`), tools, streaming in `/v1/completions`, penalties, `best_of` and beam search.
 
 ## Tests
 
